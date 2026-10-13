@@ -1,0 +1,7 @@
+# MORTIS - EXPERIMENT LOG (EXPERIMENTS.md)
+
+| Date | Question / Hypothesis | What Changed | Result | Decision & Rationale |
+|---|---|---|---|---|
+| Oct 8, 2026 | **Exp 1: Max Notional Cap**<br/>Does a 25% max notional cap restrict standard ATR risk sizing? | Set `maxNotionalPct` to 0.25 vs 0.50 with a 1.5x ATR stop loss distance. | At 25% cap, position sizing was constrained in >90% of trade setups, effectively scaling back risk below 0.75% equity. At 50% cap, risk sizing is respected. | **Keep 50% cap** for Week 1 (still enforces 1x spot leverage with zero debt/borrowing). |
+| Oct 8, 2026 | **Exp 2: Confidence Threshold Sweep**<br/>How does trade frequency change across confidence thresholds 0.50 vs 0.60 vs 0.70? | Swept threshold in `config.ts` across market snapshot evaluations. | 0.50 threshold generated frequent, noisy setups. 0.70 was overly conservative. 0.60 provided optimal balance between trade quality & selectivity. | **Keep 0.60 threshold**. |
+| Oct 8, 2026 | **Exp 3: Multi-Timeframe Confluence**<br/>Does evaluating 4h trend + 1h setup + 15m entry reduce false trade entries compared to single 1h timeframe analysis? | Tested TA agent prompt with single timeframe vs 3-timeframe snapshot. | Multi-timeframe evaluation flagged neutral decisions whenever 15m entry conflicted with 4h macro trend, reducing false breakout entries. | **Keep 4h/1h/15m multi-timeframe requirement**. |

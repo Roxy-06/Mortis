@@ -1,0 +1,32 @@
+# Environment and secret files
+.env
+.env*.local
+.agent-wallet.json
+
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+
+# Python cache & build files
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime data directory (decisions, paper account state)
+data/
+decisions/
+
+# Logs & temp files
+*.log
+*.tmp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.ds_store
+Thumbs.db

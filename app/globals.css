@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #080d0b;
+  --foreground: #ffffff;
+}
+
+/* Custom Minimal Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #080d0b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1c2d25;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2b4539;
+}
+
+body {
+  color: #ffffff;
+  background-color: #080d0b;
+  min-height: 100vh;
+  overflow-x: hidden;
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+}
+
+/* Premium Card Surfaces */
+.dashboard-card {
+  background-color: #111a16;
+  border: 1px solid #1c2d25;
+  border-radius: 1.5rem;
+}
+
+.dashboard-card-hover {
+  transition: all 0.2s ease-in-out;
+}
+
+.dashboard-card-hover:hover {
+  border-color: #263d32;
+  background-color: #13201b;
+}
+
+/* Glow effects */
+.glow-lime {
+  filter: drop-shadow(0 0 12px rgba(181, 245, 66, 0.4));
+}
+
+.glow-emerald {
+  filter: drop-shadow(0 0 16px rgba(16, 185, 129, 0.35));
+}

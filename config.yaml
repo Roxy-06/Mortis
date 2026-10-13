@@ -1,0 +1,35 @@
+# MORTIS CONFIGURATION
+symbol: "BTCUSDT"
+timeframes:
+  - "4h"
+  - "1h"
+  - "15m"
+
+candles_per_timeframe: 300
+
+# Consensus & Agent Thresholds
+weights:
+  ta: 0.6
+  news: 0.4
+threshold: 0.60
+min_agreeing: 1
+confidence_cap: 0.95
+
+# Deterministic Risk Rules
+starting_equity_usd: 10000.0
+base_risk_pct: 0.0075          # 0.75% equity risked per trade
+max_size_multiplier: 1.5
+max_notional_pct: 0.50         # 50% max notional (1x spot leverage)
+max_open_positions: 1
+max_daily_loss_pct: 0.03       # 3% daily drawdown stop loss
+
+sl_atr_mult: 1.5
+tp_atr_mult: 2.5
+atr_timeframe: "1h"
+
+fee_pct_per_side: 0.001        # 0.1% per trade side
+slippage_pct: 0.0005           # 0.05% slippage
+leverage: 1
+
+prompt_version: "v1"
+gemini_model: "gemini-2.5-flash"
