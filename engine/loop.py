@@ -1,6 +1,8 @@
 import os
 import time
 import argparse
+import logging
+import threading
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,31 +33,35 @@ def run_single_cycle():
     print(f"[PROOF] SHA-256 Decision Hash: {rec['decision_hash']}")
     return result
 
-def run_loop(interval_sec: int = 900):
-    """Run continuous slow path (every 15 min) + fast settlement check"""
+def run_loop(
+    interval_sec: int = 900,
+    poll_sec: int = 5,
+    stop_event: threading.Event | None = None,
+):
+    """Run AI analysis every 15 minutes and settle against live prices every few seconds."""
     print("=========================================")
     print(" MORTIS AUTONOMOUS ENGINE RUNNING ")
     print("=========================================")
     trader = PaperTrader()
-    
-    while True:
+    stop_event = stop_event or threading.Event()
+
+    while not stop_event.is_set():
         try:
-            # Slow path strategy cycle
             run_single_cycle()
-            
-            # Fast path price watcher loop until next 15-min cycle
             start_time = time.time()
-            while time.time() - start_time < interval_sec:
-                time.sleep(15)
+            while time.time() - start_time < interval_sec and not stop_event.is_set():
+                if stop_event.wait(poll_sec):
+                    break
                 price = fetch_current_price("BTCUSDT")
-                trader.settle_open_position()
+                trader.settle_open_position(price)
                 
         except KeyboardInterrupt:
             print("\n[Mortis Engine] Shutdown requested.")
             break
         except Exception as e:
-            print(f"[ERR] Error in cycle loop: {e}")
-            time.sleep(10)
+            logging.exception("[Mortis Engine] Autonomous cycle failed")
+            if stop_event.wait(10):
+                break
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mortis Trading Engine")

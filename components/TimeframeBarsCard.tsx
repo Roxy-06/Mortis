@@ -1,7 +1,21 @@
 'use client';
 
 import { useState } from 'react';
-import { BarChart3, TrendingUp, TrendingDown, Layers, Activity } from 'lucide-react';
+import { BarChart3 } from 'lucide-react';
+
+export interface TimeframeIndicators {
+  rsi14: number;
+  ema20: number;
+  ema50: number;
+  ema200: number;
+  volume_ratio: number;
+  trend_flags: {
+    price_above_ema50: boolean;
+    ema20_above_ema50: boolean;
+    ema50_above_ema200: boolean;
+  };
+  macd: { histogram_rising: boolean };
+}
 
 interface TimeframeMetric {
   tf: string;
@@ -10,117 +24,139 @@ interface TimeframeMetric {
   bias: 'BULLISH' | 'NEUTRAL' | 'BEARISH';
   rsi: number;
   emaStatus: string;
-  volumeRatio: string;
+  volumeRatio: number;
 }
 
-export function TimeframeBarsCard() {
-  const [selectedTf, setSelectedTf] = useState<string>('1h');
+interface TimeframeBarsCardProps {
+  timeframes?: Record<string, TimeframeIndicators>;
+}
 
-  const metrics: TimeframeMetric[] = [
-    { tf: '15m', label: 'Micro Momentum', score: 86, bias: 'BULLISH', rsi: 58.4, emaStatus: 'EMA20 > EMA50', volumeRatio: '1.82x' },
-    { tf: '1h', label: 'Structural Trend', score: 74, bias: 'BULLISH', rsi: 52.8, emaStatus: 'EMA50 Expanding', volumeRatio: '1.34x' },
-    { tf: '4h', label: 'Macro Regime', score: 58, bias: 'NEUTRAL', rsi: 44.2, emaStatus: 'Testing S/R Base', volumeRatio: '1.15x' },
-    { tf: '1D', label: 'Daily Confluence', score: 68, bias: 'BULLISH', rsi: 51.0, emaStatus: 'Above 200 EMA', volumeRatio: '1.20x' },
-  ];
+const timeframeLabels: Record<string, string> = {
+  '15m': 'Entry momentum',
+  '1h': 'Market structure',
+  '4h': 'Macro trend',
+};
 
-  const activeMetric = metrics.find(m => m.tf === selectedTf) || metrics[1];
+export function TimeframeBarsCard({ timeframes = {} }: TimeframeBarsCardProps) {
+  const [selectedTf, setSelectedTf] = useState('1h');
+  const metrics: TimeframeMetric[] = ['15m', '1h', '4h'].flatMap((tf) => {
+    const indicators = timeframes[tf];
+    if (!indicators) return [];
+    const flags = indicators.trend_flags;
+    const bullishSignals = [
+      flags.price_above_ema50,
+      flags.ema20_above_ema50,
+      flags.ema50_above_ema200,
+      indicators.macd.histogram_rising,
+      indicators.rsi14 >= 50,
+    ].filter(Boolean).length;
+    const bearishSignals = [
+      !flags.price_above_ema50,
+      !flags.ema20_above_ema50,
+      !flags.ema50_above_ema200,
+      !indicators.macd.histogram_rising,
+      indicators.rsi14 < 50,
+    ].filter(Boolean).length;
+    const bias =
+      bullishSignals > bearishSignals
+        ? 'BULLISH'
+        : bearishSignals > bullishSignals
+          ? 'BEARISH'
+          : 'NEUTRAL';
+
+    return [{
+      tf,
+      label: timeframeLabels[tf],
+      score: Math.round((Math.max(bullishSignals, bearishSignals) / 5) * 100),
+      bias,
+      rsi: indicators.rsi14,
+      emaStatus: `20 ${indicators.ema20 >= indicators.ema50 ? '>' : '<'} 50 · 50 ${indicators.ema50 >= indicators.ema200 ? '>' : '<'} 200`,
+      volumeRatio: indicators.volume_ratio,
+    }];
+  });
+  const activeMetric = metrics.find((metric) => metric.tf === selectedTf) || metrics[0];
 
   return (
-    <div className="bg-[#111a16] border border-[#1a2922] rounded-3xl p-5 sm:p-6 space-y-4 flex flex-col justify-between">
-      
-      {/* Header */}
-      <div className="flex items-center justify-between pb-1">
-        <div className="flex items-center space-x-2">
-          <div className="w-6 h-6 rounded-lg bg-[#b5f542]/15 flex items-center justify-center text-[#b5f542]">
-            <BarChart3 className="w-3.5 h-3.5" />
+    <div className="flex flex-col justify-between space-y-4 rounded-3xl border border-[#1a2922] bg-[#111a16] p-5 sm:p-6">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#b5f542]/15 text-[#b5f542]">
+            <BarChart3 className="h-3.5 w-3.5" />
           </div>
-          <h3 className="text-sm font-semibold text-white">
-            Timeframe Confluence Bars
-          </h3>
+          <h3 className="text-sm font-semibold text-white">Live timeframe signals</h3>
         </div>
-
-        {/* Timeframe pill tabs */}
-        <div className="flex items-center bg-[#0c1310] p-1 rounded-xl border border-[#1a2922]">
-          {metrics.map((m) => (
-            <button
-              key={m.tf}
-              onClick={() => setSelectedTf(m.tf)}
-              className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all ${
-                selectedTf === m.tf
-                  ? 'bg-[#b5f542] text-black shadow-sm'
-                  : 'text-[#7f9389] hover:text-white'
-              }`}
-            >
-              {m.tf}
-            </button>
-          ))}
-        </div>
+        <span className="text-[9px] text-[#7f9389]">5 indicator checks · not a probability</span>
       </div>
 
-      {/* Bar Graphs Display */}
-      <div className="space-y-3">
-        {metrics.map((m) => {
-          const isSelected = selectedTf === m.tf;
-          const isBull = m.score >= 65;
-          const isNeutral = m.score >= 45 && m.score < 65;
-
-          return (
-            <div 
-              key={m.tf}
-              onClick={() => setSelectedTf(m.tf)}
-              className={`p-2 rounded-xl transition-all cursor-pointer ${
-                isSelected ? 'bg-[#18261f] border border-[#263d32]' : 'hover:bg-[#16231d]'
-              }`}
-            >
-              <div className="flex justify-between items-center text-xs mb-1.5">
-                <div className="flex items-center space-x-2">
-                  <span className="font-bold text-white font-mono">{m.tf}</span>
-                  <span className="text-[11px] text-[#7f9389]">{m.label}</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
-                    isBull ? 'text-[#10b981] bg-[#10b981]/10' :
-                    isNeutral ? 'text-[#b5f542] bg-[#b5f542]/10' :
-                    'text-[#ff5c5c] bg-[#ff5c5c]/10'
-                  }`}>
-                    {m.bias}
-                  </span>
-                  <span className="font-bold text-white text-xs font-mono">{m.score}%</span>
-                </div>
-              </div>
-
-              {/* Progress Bar */}
-              <div className="w-full h-2.5 bg-[#0c1310] rounded-full overflow-hidden border border-[#18261f]">
-                <div 
-                  className={`h-full rounded-full transition-all duration-500 ${
-                    isBull ? 'bg-gradient-to-r from-[#10b981] to-[#b5f542]' :
-                    isNeutral ? 'bg-gradient-to-r from-[#7f9389] to-[#b5f542]' :
-                    'bg-[#ff5c5c]'
+      {metrics.length === 0 ? (
+        <p className="py-8 text-center text-xs text-[#7f9389]">Waiting for live market indicators.</p>
+      ) : (
+        <>
+          <div className="space-y-3">
+            {metrics.map((metric) => {
+              const isSelected = selectedTf === metric.tf;
+              const color =
+                metric.bias === 'BULLISH'
+                  ? 'from-[#10b981] to-[#b5f542]'
+                  : metric.bias === 'BEARISH'
+                    ? 'from-[#ff5c5c] to-[#ff8c8c]'
+                    : 'from-[#7f9389] to-[#b5f542]';
+              return (
+                <button
+                  type="button"
+                  key={metric.tf}
+                  onClick={() => setSelectedTf(metric.tf)}
+                  className={`w-full rounded-xl p-2 text-left transition-all ${
+                    isSelected ? 'border border-[#263d32] bg-[#18261f]' : 'hover:bg-[#16231d]'
                   }`}
-                  style={{ width: `${m.score}%` }}
-                ></div>
+                >
+                  <div className="mb-1.5 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-white">{metric.tf}</span>
+                      <span className="text-[11px] text-[#7f9389]">{metric.label}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                        metric.bias === 'BULLISH'
+                          ? 'bg-[#10b981]/10 text-[#10b981]'
+                          : metric.bias === 'BEARISH'
+                            ? 'bg-[#ff5c5c]/10 text-[#ff8c8c]'
+                            : 'bg-[#b5f542]/10 text-[#b5f542]'
+                      }`}>
+                        {metric.bias}
+                      </span>
+                      <span className="font-mono text-xs font-bold text-white">{metric.score}%</span>
+                    </div>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full border border-[#18261f] bg-[#0c1310]">
+                    <div
+                      className={`h-full rounded-full bg-gradient-to-r ${color} transition-all duration-500`}
+                      style={{ width: `${metric.score}%` }}
+                    />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {activeMetric && (
+            <div className="grid grid-cols-3 gap-2 border-t border-[#18261f] pt-3 text-center text-xs">
+              <div className="rounded-xl border border-[#18261f] bg-[#0c1310] p-2">
+                <span className="block text-[10px] text-[#7f9389]">RSI (14)</span>
+                <span className="font-mono font-bold text-white">{activeMetric.rsi.toFixed(2)}</span>
+              </div>
+              <div className="rounded-xl border border-[#18261f] bg-[#0c1310] p-2">
+                <span className="block text-[10px] text-[#7f9389]">EMA ALIGNMENT</span>
+                <span className="block truncate text-[10px] font-semibold text-[#b5f542]">{activeMetric.emaStatus}</span>
+              </div>
+              <div className="rounded-xl border border-[#18261f] bg-[#0c1310] p-2">
+                <span className="block text-[10px] text-[#7f9389]">VOLUME RATIO</span>
+                <span className="font-mono font-bold text-white">{activeMetric.volumeRatio.toFixed(2)}x</span>
               </div>
             </div>
-          );
-        })}
-      </div>
-
-      {/* Selected Timeframe Breakdown Row */}
-      <div className="pt-2 border-t border-[#18261f] grid grid-cols-3 gap-2 text-center text-xs">
-        <div className="bg-[#0c1310] p-2 rounded-xl border border-[#18261f]">
-          <span className="text-[10px] text-[#7f9389] block">RSI (14)</span>
-          <span className="text-white font-bold font-mono">{activeMetric.rsi}</span>
-        </div>
-        <div className="bg-[#0c1310] p-2 rounded-xl border border-[#18261f]">
-          <span className="text-[10px] text-[#7f9389] block">EMA RIBBON</span>
-          <span className="text-[#b5f542] font-semibold text-[10px] truncate block">{activeMetric.emaStatus}</span>
-        </div>
-        <div className="bg-[#0c1310] p-2 rounded-xl border border-[#18261f]">
-          <span className="text-[10px] text-[#7f9389] block">VOL DELTA</span>
-          <span className="text-[#10b981] font-bold font-mono">{activeMetric.volumeRatio}</span>
-        </div>
-      </div>
-
+          )}
+        </>
+      )}
     </div>
   );
 }

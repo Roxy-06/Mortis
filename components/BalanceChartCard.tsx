@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -16,7 +16,7 @@ export interface EquityPoint {
   time?: string;
 }
 
-interface CandleData {
+export interface CandleData {
   time: number;
   open: number;
   high: number;
@@ -29,20 +29,22 @@ interface BalanceChartCardProps {
   currentCapital?: number;
   initialCapital?: number;
   currentBtcPrice?: number;
+  marketCandles?: CandleData[];
   equityHistory?: EquityPoint[];
 }
 
 export function BalanceChartCard({
-  currentCapital = 10340.50,
+  currentCapital = 10000.00,
   initialCapital = 10000.00,
-  currentBtcPrice = 83838.00,
+  currentBtcPrice = 0,
+  marketCandles = [],
   equityHistory
 }: BalanceChartCardProps) {
   const [displayMode, setDisplayMode] = useState<'curve' | 'candles' | 'dual'>('curve');
   const [timeframe, setTimeframe] = useState('6 Month');
   const [showTfDropdown, setShowTfDropdown] = useState(false);
-  const [candles, setCandles] = useState<CandleData[]>([]);
   const [hoveredPoint, setHoveredPoint] = useState<EquityPoint | null>(null);
+  const candles = marketCandles;
 
   const returnPct = (((currentCapital - initialCapital) / initialCapital) * 100).toFixed(2);
   const isPositive = currentCapital >= initialCapital;
@@ -54,55 +56,10 @@ export function BalanceChartCard({
       return equityHistory;
     }
     return [
-      { label: 'Initial Deposit', equity: 10000.00, time: '10:00 AM' },
-      { label: 'Trade #1 (Long BTC)', equity: 10145.20, time: '10:30 AM' },
-      { label: 'Trade #2 (Long BTC)', equity: 10230.20, time: '11:15 AM' },
-      { label: 'Trade #3 (Short Loss)', equity: 10188.20, time: '11:45 AM' },
-      { label: 'Trade #4 (Long Win)', equity: currentCapital, time: 'Now' },
+      { label: 'Starting balance', equity: initialCapital, time: '' },
+      { label: 'Current equity', equity: currentCapital, time: 'Now' },
     ];
   }, [equityHistory, currentCapital]);
-
-  // Initialize and animate candlesticks for BTC
-  useEffect(() => {
-    const count = 48;
-    const now = Date.now();
-    const intervalMs = 60000;
-    const initialList: CandleData[] = [];
-    let p = currentBtcPrice;
-
-    for (let i = 0; i < count; i++) {
-      const delta = (Math.sin(i * 0.45) + (Math.random() - 0.48)) * 140;
-      const open = p;
-      const close = p + delta;
-      const high = Math.max(open, close) + Math.random() * 60;
-      const low = Math.min(open, close) - Math.random() * 60;
-      initialList.unshift({
-        time: now - (count - 1 - i) * intervalMs,
-        open: +open.toFixed(2),
-        high: +high.toFixed(2),
-        low: +low.toFixed(2),
-        close: +close.toFixed(2),
-        volume: Math.floor(10 + Math.random() * 60)
-      });
-      p = close;
-    }
-    setCandles(initialList);
-
-    // Live micro-ticks to keep chart moving
-    const ticker = setInterval(() => {
-      setCandles(prev => {
-        if (prev.length === 0) return prev;
-        const last = { ...prev[prev.length - 1] };
-        const jitter = (Math.random() - 0.49) * 30;
-        last.close = +(last.close + jitter).toFixed(2);
-        last.high = Math.max(last.high, last.close);
-        last.low = Math.min(last.low, last.close);
-        return [...prev.slice(0, prev.length - 1), last];
-      });
-    }, 1200);
-
-    return () => clearInterval(ticker);
-  }, [currentBtcPrice]);
 
   const broadWidth = 760;
   const broadHeight = 260;
@@ -369,7 +326,9 @@ export function BalanceChartCard({
           <div className="h-full w-full bg-[#0c1310] rounded-2xl border border-[#18261f] p-3.5 flex flex-col justify-between">
             <div className="flex justify-between text-xs text-[#7f9389]">
               <span>BTC/USDT Live Candlesticks</span>
-              <span className="text-[#10b981] font-bold">${candles[candles.length - 1]?.close.toLocaleString() || '83,838'}</span>
+              <span className="text-[#10b981] font-bold">
+                {currentBtcPrice > 0 ? `$${currentBtcPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : 'Market data unavailable'}
+              </span>
             </div>
             <div className="h-[230px] w-full">
               {renderCandlestickView()}

@@ -35,7 +35,8 @@ def log_decision_record(
     rationale: str,
     trade_plan: Dict[str, Any],
     risk_checks: Dict[str, bool],
-    model_id: str = "gemini-2.5-flash"
+    model_id: str = "gemini-2.5-flash",
+    leverage: int = 1,
 ) -> Dict[str, Any]:
     """Write decision record to disk with SHA-256 hash and hash chaining"""
     decision_id = f"dec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -60,9 +61,9 @@ def log_decision_record(
             "max_daily_loss_pct": 0.03,
             "sl_atr_mult": 1.5,
             "tp_atr_mult": 2.5,
-            "fee_pct_per_side": 0.001,
+            "fee_pct_round_trip": 0.03,
             "slippage_pct": 0.0005,
-            "leverage": 1
+            "leverage": leverage
         },
         "inputs": {
             "price": price,
@@ -87,6 +88,7 @@ def log_decision_record(
             "take_profit": trade_plan["take_profit"],
             "size_btc": trade_plan["size_btc"],
             "risk_amount_usd": trade_plan["risk_amount_usd"],
+            "leverage": leverage,
             "notional_usd": trade_plan["notional_usd"],
             "flags": trade_plan.get("flags", [])
         } if trade_plan["action"] != "no_trade" else None,

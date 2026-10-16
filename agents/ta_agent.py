@@ -1,24 +1,27 @@
 import os
 import json
 import hashlib
+import math
 from typing import Dict, Any
 from tools.market_data import fetch_multi_timeframe_candles, fetch_current_price
 from tools.indicators import compute_timeframe_indicators
 from engine.risk import calculate_risk
 from engine.paper_trader import PaperTrader
 from chain.logger import log_decision_record
+from engine.risk import load_config
 
 SYSTEM_PROMPT = """You are Mortis, an autonomous Bitcoin paper-trading analyst agent. You analyze live BTC/USDT market data and make simulated paper-trading decisions. You never trade real money.
 
 Rules:
 1. Read the market snapshot top-down: 4h = trend direction, 1h = setup quality, 15m = entry timing. Prefer trades aligned with the 4h trend. If timeframes conflict or setup is weak, output direction = "neutral".
+   Respond to the user's focus in the rationale when practical, but base the trade direction on market evidence rather than a requested outcome. Be clear, energetic, and practical without overstating certainty.
 2. You output ONLY JSON matching this format:
 {
   "direction": "long" | "short" | "neutral",
   "confidence": 0.0 - 1.0,
   "rationale": "Max 3 concise sentences summarizing key indicator alignment."
 }
-3. Confidence guide: 0.50 = weak lean, 0.60-0.70 = decent setup, 0.80+ = rare and strong, never above 0.95.
+3. Confidence guide: below 0.55 = weak, 0.55-0.69 = modest setup, 0.70-0.84 = solid, 0.85+ = unusually strong; confidence is a model rating, not a probability. Never exceed 0.95.
 4. Never calculate stop-loss, take-profit or position size yourself; the system computes them.
 5. Be honest and objective."""
 
@@ -62,7 +65,7 @@ class TAAgent:
             "rationale": rationale
         }
 
-    def analyze_and_trade(self) -> Dict[str, Any]:
+    def analyze_and_trade(self, user_message: str = "") -> Dict[str, Any]:
         """Fetch market snapshot, query Gemini TA agent (or fallback rules), run risk engine, log & execute paper trade"""
         price = fetch_current_price("BTCUSDT")
         tf_candles = fetch_multi_timeframe_candles("BTCUSDT", ["4h", "1h", "15m"])
@@ -98,7 +101,11 @@ class TAAgent:
                 from google.genai import types
 
                 client = genai.Client(api_key=self.api_key)
-                prompt = f"Analyze this live market snapshot and give your JSON decision:\n{json.dumps(snapshot, indent=2)}"
+                prompt = (
+                    f"User's analysis request: {user_message[:1000] or 'Provide a practical market read.'}\n"
+                    f"Analyze this live market snapshot and give your JSON decision:\n"
+                    f"{json.dumps(snapshot, indent=2)}"
+                )
                 
                 response = client.models.generate_content(
                     model=self.model_name,
@@ -117,6 +124,15 @@ class TAAgent:
                     raw_text = raw_text.split("```")[1].split("```")[0].strip()
 
                 agent_decision = json.loads(raw_text)
+                confidence = agent_decision.get("confidence")
+                if (
+                    agent_decision.get("direction") not in ("long", "short", "neutral")
+                    or not isinstance(confidence, (int, float))
+                    or not math.isfinite(confidence)
+                    or not 0.0 <= confidence <= 1.0
+                    or not isinstance(agent_decision.get("rationale"), str)
+                ):
+                    raise ValueError("Gemini returned an invalid decision shape.")
             except Exception as e:
                 print(f"[Gemini API Notice]: {e}. Using deterministic TA fallback rule engine.")
                 agent_decision = self._fallback_deterministic_analysis(
@@ -132,37 +148,29 @@ class TAAgent:
         rationale = agent_decision.get("rationale", "")
 
         # Settle paper account & check guards
-        self.paper_trader.settle_open_position()
+        self.paper_trader.settle_open_position(price)
         account_state = self.paper_trader.get_state()
         guard = self.paper_trader.is_trading_blocked()
-
+        config = load_config()
         atr_1h = ind_1h["atr14"]
         trade_plan = calculate_risk(
             direction=direction,
             confidence=confidence,
             price=price,
             atr=atr_1h,
-            equity=account_state["equity"]
+            equity=account_state["equity"],
+            config=config,
+            leverage=None,
         )
+        leverage = trade_plan.leverage
 
         final_action = trade_plan.action
         reason_if_no_trade = trade_plan.reason_if_no_trade
 
-        opened_trade = None
         if final_action != "no_trade":
             if guard["blocked"]:
                 final_action = "no_trade"
                 reason_if_no_trade = guard["reason"]
-            else:
-                opened_trade = self.paper_trader.open_position(
-                    decision_id="pending",
-                    side=final_action,
-                    entry=trade_plan.entry,
-                    size_btc=trade_plan.size_btc,
-                    stop_loss=trade_plan.stop_loss,
-                    take_profit=trade_plan.take_profit,
-                    initial_risk_usd=trade_plan.risk_amount_usd
-                )
 
         trade_plan_dict = {
             "action": final_action,
@@ -176,6 +184,7 @@ class TAAgent:
             "notional_usd": trade_plan.notional_usd,
             "risk_amount_usd": trade_plan.risk_amount_usd,
             "size_multiplier": trade_plan.size_multiplier,
+            "leverage": trade_plan.leverage,
             "flags": trade_plan.flags
         }
 
@@ -188,16 +197,29 @@ class TAAgent:
             trade_plan=trade_plan_dict,
             risk_checks={
                 "threshold_ok": final_action != "no_trade" or "threshold" not in (reason_if_no_trade or ""),
-                "open_positions_ok": not account_state.get("open_position"),
-                "daily_loss_ok": not guard["blocked"],
+                "open_positions_ok": not bool(account_state.get("open_position")),
+                "daily_loss_ok": not (
+                    guard["blocked"] and "Daily loss limit" in guard.get("reason", "")
+                ),
                 "notional_cap_ok": "capped_by_notional" not in trade_plan.flags
             },
-            model_id=self.model_name
+            model_id=self.model_name,
+            leverage=leverage,
         )
 
-        if opened_trade and self.paper_trader.get_state().get("open_position"):
-            self.paper_trader.state["open_position"]["decision_id"] = record["decision_id"]
-            self.paper_trader._save_state()
+        if final_action != "no_trade":
+            self.paper_trader.open_position(
+                decision_id=record["decision_id"],
+                side=final_action,
+                entry=trade_plan.entry,
+                size_btc=trade_plan.size_btc,
+                stop_loss=trade_plan.stop_loss,
+                take_profit=trade_plan.take_profit,
+                initial_risk_usd=trade_plan.risk_amount_usd,
+                leverage=leverage,
+                source="ai",
+                rationale=rationale,
+            )
 
         return {
             "snapshot": snapshot,

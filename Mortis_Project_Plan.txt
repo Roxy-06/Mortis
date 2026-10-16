@@ -1,6 +1,6 @@
 ================================================================================
 MORTIS - PROJECT PLAN (for IDE / AI coding assistant)
-Accountable AI BTC trading agent with an on-chain "Proof of Reasoning"
+Accountable AI BTC paper-trading agent with a local "Proof of Reasoning"
 Built for the Agentmaxxing program (Oct 5 - Oct 30, 2026)
 ================================================================================
 
@@ -18,8 +18,8 @@ often. Verify against the official docs before coding against them.
 1. ONE-SENTENCE SCOPE
 ---------------------
 Mortis is an AI trading agent that analyzes BTC across multiple timeframes,
-paper-trades with a take-profit and stop-loss, and commits a hash of its
-reasoning on-chain BEFORE every trade, so its decisions can be verified later.
+paper-trades with deterministic risk controls, and stores decision and trade
+events in a local SQLite database with a verifiable SHA-256 hash chain.
 
 Pitch line: "The AI decides, code limits the risk, and the blockchain proves
 what the AI decided and when."
@@ -51,23 +51,30 @@ Implications:
   - Working end-to-end loop first, features second.
   - Keep EXPERIMENTS.md from day one (experimentation is 25%).
   - Write docs while building, not at the end.
-  - The wallet + on-chain hash is a core deliverable, not decoration.
+  - For the current app, reliable paper execution and a persistent,
+    verifiable local transaction ledger are core deliverables.
+  - Public blockchain writes are out of scope for the current paper-trading build.
 
 
 3. HONEST CONSTRAINTS (do not violate in code or in docs)
 ---------------------------------------------------------
-  - Paper trading ONLY. Testnet ONLY. No real funds. Not financial advice.
+  - Paper trading ONLY. No real funds or exchange orders. Not financial advice.
+  - Leverage is simulated only, configurable from 1x to 10x. Each position is
+    isolated to its reserved margin; its loss is capped at that margin.
+  - Charge a 3% fee once per completed round-trip, calculated on entry notional.
+  - Persist trades in SQLite and append each trade event to the local hash chain.
+    This is not a public blockchain and does not provide external immutability.
   - Do NOT claim the system is profitable. Report honest backtest numbers
     (win rate, max drawdown, vs buy-and-hold).
-  - Testnet DEX prices/liquidity are not real, so the strategy runs against
-    real Binance prices in a paper-trading engine. Testnet swaps (if any) are
-    symbolic only.
-  - Hashing a decision on-chain proves it existed before the trade and was not
-    edited later. It does NOT prove the reasoning was correct. Word it that way.
+  - The strategy uses public Binance market data in a paper-trading engine.
+  - A local hash chain can detect edits when verified, but is not publicly
+    anchored and does not prove that the reasoning was correct.
   - LLM "confidence" numbers are not calibrated probabilities. Log them and
     measure calibration later; never treat 0.99 as a reason to bet bigger.
   - Latency target is seconds/minutes, NOT microseconds. LLM agents do not do HFT.
-  - Leverage is 1x (spot-style). No leverage in v1.
+  - The autonomous paper trader starts with the local engine and evaluates a
+    strategy every 15 minutes; plain-code position checks run every 5 seconds.
+  - Leverage never exceeds 10x; AI leverage defaults to the configured 1x.
   - The LLM never does arithmetic that matters (indicators, SL/TP, sizing).
     Those are deterministic code.
 
@@ -79,10 +86,10 @@ Two paths:
   SLOW PATH (every 15 min, LLM agents):
     fetch data -> TA agent + News agent -> Lead agent consensus ->
     deterministic risk/sizing -> build decision JSON -> canonicalize + hash ->
-    store JSON (IPFS or local /decisions) -> post hash on-chain ->
-    ONLY THEN open the paper trade.
+    store JSON locally -> open the simulated paper trade -> append trade event
+    and result to SQLite's SHA-256 hash-chained ledger.
 
-  FAST PATH (plain code, every tick or every few seconds):
+  FAST PATH (plain code, every 5 seconds):
     watch price feed -> check open paper position against SL/TP -> close it.
     No LLM involved.
 
@@ -96,10 +103,10 @@ Components:
   [Lead Agent]     weights agent outputs, applies threshold, may veto.
                    Does NOT compute prices or sizes itself.
   [Risk Engine]    pure Python: ATR-based SL/TP, sizing, caps, kill switch.
-  [Paper Engine]   pure Python: simulated account, positions, PnL, fees,
-                   also used as the backtester (same code path).
-  [Chain Layer]    wallet (Coinbase AgentKit), decision-hash contract on
-                   Base Sepolia, verifier utility.
+  [Paper Engine]   pure Python: SQLite-backed simulated account, margin,
+                   positions, PnL, fees, and isolated-margin liquidation.
+  [Chain Layer]    local SHA-256 transaction event chain and verifier.
+                   Public blockchain writes are a separate future feature.
   [Dashboard]      Streamlit: decisions, equity curve vs buy-and-hold,
                    tx links, Verify button.
 
@@ -140,14 +147,15 @@ Config (in config.yaml, all tunable, all logged in each decision):
   confidence_cap:     0.95
   base_risk_pct:      0.0075   (0.75% of equity risked per trade)
   max_size_multiplier:1.5
-  max_notional_pct:   0.25     (position notional <= 25% of equity)
+  max_notional_pct:   0.50     (base notional cap, multiplied by leverage)
+  max_leverage:       10
   max_open_positions: 1
   max_daily_loss_pct: 0.03     (hard stop for the day -> kill switch)
   sl_atr_mult:        1.5
   tp_atr_mult:        2.5
-  fee_pct:            0.001    (per side, simulate fees)
+  fee_pct_round_trip: 0.03     (charged once on close against entry notional)
   slippage_pct:       0.0005
-  leverage:           1
+  leverage:           1        (AI default; 1x-10x paper simulation)
 
 Score:
   score = sum(w_i * direction_i * min(conf_i, cap)) / sum(w_i)    # range -1..1
@@ -162,10 +170,14 @@ Entry / SL / TP:
   short: SL = entry + sl_atr_mult*ATR ; TP = entry - tp_atr_mult*ATR
 
 Sizing:
-  risk_amount = equity * base_risk_pct * size_multiplier
+  risk_budget = equity * base_risk_pct * size_multiplier
   size_multiplier = clamp(1 + 0.5*(|score|-threshold)/(1-threshold), 1.0, max_size_multiplier)
-  position_size = risk_amount / |entry - SL|
-  then cap so notional <= max_notional_pct * equity
+  risk_per_btc = |entry - SL| + entry * fee_pct_round_trip
+  position_size = risk_budget / risk_per_btc
+  then cap so notional <= max_notional_pct * equity * leverage
+  Report actual risk as position_size * risk_per_btc. Do not open an AI trade
+  unless its expected take-profit distance is greater than the round-trip fee
+  per BTC; a nominal target below fees is expected to lose after costs.
 
 Trailing logic (checked on each 15-min loop):
   If TP is hit and a fresh Lead decision still agrees with the direction,
@@ -209,44 +221,29 @@ One record per 15-min cycle, including "no_trade" cycles.
 Hashing:
   - Canonicalize: JSON with sorted keys, no extra whitespace, UTF-8.
   - hash = keccak256(canonical_bytes)  (or sha256; pick one and document it)
-  - Chain the records via previous_decision_hash (tamper-evident history).
-  - Store full JSON in /decisions/<decision_id>.json (and IPFS if time allows).
-  - Post the hash on-chain BEFORE opening the paper trade.
+  - Chain decision records via previous_decision_hash.
+  - Store full JSON in /decisions/<decision_id>.json.
+  - Trade open/close events are separately persisted in SQLite and hash-chained.
+  - The local hash chain detects edits; it is not a public blockchain.
 
 Outcome records (trade closed, PnL) are written separately, linked by
 decision_id, and optionally also hashed on-chain.
 
 
-8. WEB3 LAYER
--------------
-Network: Base Sepolia (testnet). Faucet ETH for gas.
-Wallet: Coinbase AgentKit (Python). Fallback if it blocks progress: sign and
-send transactions directly with web3.py using a generated testnet key.
-SECURITY: private keys and API keys live in .env only, never committed.
-.env.example is committed with placeholder values. Add .env to .gitignore.
+8. LOCAL AUDIT AND FUTURE WEB3
+------------------------------
+Current build:
+  - Persist account state, positions, outcomes, and trade-event hashes in
+    data/mortis.db (SQLite).
+  - Hash canonical event records with SHA-256 and link each to the prior event.
+  - Verify the full local event chain before accepting new trades.
+  - Do not label local hashes as blockchain transactions or claim external
+    immutability.
 
-Smart contract (tiny, Solidity) - DecisionLog:
-  - function logDecision(bytes32 decisionHash, string uri) external
-  - emits event DecisionLogged(address indexed agent, bytes32 indexed decisionHash,
-    string uri, uint256 timestamp)
-  - optional: simple per-day cap counter (max N log calls) as a safety rule
-  - optional: owner-only pause() as an on-chain kill switch
-Deploy to Base Sepolia, record the address in config.
-
-On-chain guardrails (Week 3 goal): enforce a per-trade / per-day spend cap using
-wallet spend permissions or a simple policy contract, so limits hold even if
-the LLM misbehaves.
-
-Verifier (verify.py + Streamlit button):
-  input: transaction hash or decision_id
-  steps: fetch event -> fetch JSON (local/IPFS) -> canonicalize -> recompute
-         hash -> compare with on-chain hash -> show PASS/FAIL.
-
-Optional stretch - x402:
-  Let the agent pay small amounts from its wallet for premium data API calls
-  (pay-per-request), or expose Mortis signals behind an x402-paywalled endpoint.
-  Only attempt after the core loop and hash logging work. Follow the Week 3
-  program material for the exact setup.
+Future, separately approved work only:
+  - A testnet wallet and DecisionLog contract may anchor decision hashes.
+  - Any future wallet keys must remain in .env and must never enable mainnet
+    or real exchange orders.
 
 
 9. PROJECT STRUCTURE
@@ -274,7 +271,7 @@ Optional stretch - x402:
       loop.py                 15-min orchestration (slow path) + price watcher (fast path)
     chain/
       wallet.py               AgentKit wrapper (fallback: web3.py)
-      logger.py               canonicalize, hash, store, post on-chain
+      logger.py               canonicalize and hash AI decisions
       verify.py
       contracts/DecisionLog.sol
     dashboard/
@@ -301,7 +298,8 @@ Optional stretch - x402:
   Validation: pydantic
   Web3:     coinbase-agentkit (Python), web3.py, Solidity + Foundry or Hardhat
             (or Remix for a fast deploy)
-  UI:       Streamlit (do not build a Next.js frontend)
+  UI:       Existing Next.js dashboard (npm run dev, port 3001)
+  Storage:  SQLite via Python stdlib; local paper account in data/mortis.db
   Whale data (stretch only): mempool.space or Blockstream API for BTC.
             Etherscan is Ethereum-only and not suitable for BTC.
             CryptoQuant is paid. Twitter/X RSS is not viable.
@@ -316,10 +314,11 @@ Optional stretch - x402:
   [ ] Backtest runs on >= 2 months of candles and reports: total return,
       win rate, max drawdown, number of trades, vs buy-and-hold
   [ ] Every cycle (including no_trade) writes a decision JSON + hash
-  [ ] Hash is posted on-chain from the agent wallet BEFORE the paper trade opens
-  [ ] verify.py returns PASS for a real logged decision and FAIL if the JSON is edited
-  [ ] Streamlit shows: decision timeline, equity curve vs buy-and-hold,
-      tx links, Verify button
+  [ ] Manual and autonomous paper positions share deterministic risk checks
+  [ ] Leverage is limited to 1x-10x; isolated losses cannot exceed reserved margin
+  [ ] 3% round-trip fee, realized/unrealized P&L, and position duration are tracked
+  [ ] SQLite trade events persist and the SHA-256 ledger detects tampering
+  [ ] Next.js dashboard displays real market candles and persisted account/trades
   [ ] Replay mode: a recorded volatile day can be replayed quickly for the demo
   [ ] Kill switch / daily loss limit works
   [ ] README with architecture diagram + setup steps; EXPERIMENTS.md filled in
@@ -353,14 +352,10 @@ WEEK 2 (Oct 12-16) - "full decision engine":
  16. Run threshold/weight experiments; log in EXPERIMENTS.md.
  SUBMIT: working version.
 
-WEEK 3 (Oct 19-23) - "give it a wallet":
- 17. chain/wallet.py with AgentKit (fallback web3.py).
- 18. contracts/DecisionLog.sol; deploy to Base Sepolia.
- 19. Post hash on-chain before each paper trade; store tx hash in the record.
- 20. chain/verify.py + Verify button in Streamlit.
- 21. Spend/day caps (wallet permissions or contract rule) + kill switch.
- 22. STRETCH: x402 paid data call, or Whale agent via mempool.space.
- SUBMIT: crypto-enabled build.
+WEEK 3 (Oct 19-23) - optional future testnet work:
+ 17. Only after explicit approval, evaluate AgentKit and a Base Sepolia
+     DecisionLog contract as a separate addition to the local hash ledger.
+ 18. Never use a testnet wallet to imply real BTC execution or profits.
 
 WEEK 4 (Oct 24-25) - "polish only, no new features":
  23. Replay mode for the demo; error handling and retries.
@@ -392,10 +387,10 @@ Suggested experiments:
   1. Whale agent
   2. x402
   3. Dynamic agent weighting / Devil's Advocate agent
-  4. IPFS (keep local JSON + on-chain hash)
+  4. IPFS / public blockchain anchoring
   5. Dashboard polish
-Never cut: working trade loop, decision hashing, on-chain hash post, verifier,
-backtest numbers, README.
+Never cut: working paper-trading loop, SQLite trade history, local hash-chain
+verification, backtest numbers, README.
 
 
 15. RULES FOR THE AI CODING ASSISTANT
@@ -407,7 +402,10 @@ backtest numbers, README.
   - Never let the LLM compute prices, indicators, stop-loss, take-profit, or size.
   - Validate every LLM output with Pydantic; retry on failure; log failures.
   - Every config value used in a decision must be copied into that decision.
-  - Do not add leverage, real-money trading, or mainnet support.
+  - Never add real-money exchange execution or mainnet support.
+  - Paper leverage is capped at 10x; fees are 3% once per completed trade.
+  - Do not claim the Gemini model is trained or profitable. Store outcomes for
+    later evaluation; change strategy parameters only through measured tests.
   - Do not add features outside this file without asking.
   - When a library API is uncertain, check the official docs and say so
     instead of guessing.
