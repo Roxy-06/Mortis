@@ -1,5 +1,10 @@
 import pytest
-from chain.logger import canonicalize_json, compute_decision_hash, verify_decision_record
+from chain.logger import (
+    canonicalize_json,
+    compute_decision_hash,
+    log_decision_record,
+    verify_decision_record,
+)
 
 def test_canonical_json_key_sorting():
     obj1 = {"b": 2, "a": 1, "c": {"z": 10, "y": 20}}
@@ -36,3 +41,34 @@ def test_decision_hash_verification():
     record["score"] = 0.8
     res_tampered = verify_decision_record(record)
     assert res_tampered["valid"] is False
+
+
+def test_decision_record_preserves_exact_loaded_config(tmp_path, monkeypatch):
+    import chain.logger as logger
+
+    monkeypatch.setattr(logger, "get_decisions_dir", lambda: str(tmp_path))
+    config = {
+        "symbol": "BTCUSDT",
+        "risk": {"max_leverage": 5, "default_leverage": 2},
+        "model": {"active_version": None},
+    }
+    plan = {
+        "action": "no_trade",
+        "raw_confidence": 0.5,
+        "clamped_confidence": 0.5,
+        "reason_if_no_trade": "neutral",
+    }
+
+    record = log_decision_record(
+        price=100,
+        candles_digest="digest",
+        raw_direction="neutral",
+        rationale="No setup",
+        trade_plan=plan,
+        risk_checks={},
+        config_snapshot=config,
+    )
+
+    assert record["config_snapshot"] == config
+    assert record["symbol"] == config["symbol"]
+    assert verify_decision_record(record)["valid"] is True

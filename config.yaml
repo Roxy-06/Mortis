@@ -4,33 +4,68 @@ timeframes:
   - "4h"
   - "1h"
   - "15m"
-
 candles_per_timeframe: 300
-
-# Consensus & Agent Thresholds
-weights:
-  ta: 0.6
-  news: 0.4
-threshold: 0.55
-confidence_threshold: 0.55
-min_agreeing: 1
-confidence_cap: 0.95
-
-# Deterministic Risk Rules
-starting_equity_usd: 10000.0
-base_risk_pct: 0.0075          # 0.75% equity risked per trade
-max_size_multiplier: 1.5
-max_notional_pct: 0.50         # Base notional cap; multiplied by selected leverage
-max_open_positions: 1
-max_daily_loss_pct: 0.03       # 3% daily drawdown stop loss
-
-sl_atr_mult: 1.5
-tp_atr_mult: 2.5
 atr_timeframe: "1h"
-
-fee_pct_round_trip: 0.001      # 0.1% round-trip paper-trading fee
-slippage_pct: 0.0005           # 0.05% slippage
-max_leverage: 200
-
+starting_equity_usd: 10000.0
 prompt_version: "v1"
 gemini_model: "gemini-2.5-flash"
+
+risk:
+  confidence_threshold: 0.55
+  confidence_cap: 0.95
+  default_leverage: 2
+  max_leverage: 5
+  base_risk_pct: 0.0025
+  max_size_multiplier: 1.0
+  max_notional_pct: 0.50
+  max_open_positions: 1
+  max_daily_loss_pct: 0.03
+  max_consecutive_losses: 3
+  loss_cooldown_hours: 24
+  max_drawdown_pct: 0.10
+  max_holding_bars: 48
+  sl_atr_mult: 1.5
+  tp_atr_mult: 2.5
+  fee_pct_round_trip: 0.001
+  require_stop_and_target: true
+  stop_liquidation_buffer_pct: 0.2
+
+memory:
+  mode: advisory
+  k: 20
+  min_n: 30
+  min_gap_bars: 24
+  half_life_days: 90
+  prior_strength: 20
+  min_size_multiplier: 0.5
+  veto_gap: 0.1
+
+catchup:
+  enabled: true
+  max_holding_bars: 48
+
+learning:
+  retrain_min_new: 50
+  min_total_for_training: 200
+  auto_promote: true
+  max_calibration_error: 0.08
+
+backup:
+  daily: true
+  keep: 14
+
+backtest:
+  fee_per_side_pct: 0.0005
+  slippage_pct: 0.0005
+  include_funding: true
+  intrabar_conflict: "stop_first"
+
+model:
+  active_version: null
+  margin_over_breakeven: 0.03
+  kelly_fraction_cap: 0.25
+  retrain_interval_days: 30
+
+monitoring:
+  rolling_trades_window: 30
+  min_rolling_expectancy_r: 0.0

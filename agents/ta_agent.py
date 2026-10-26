@@ -1,180 +1,196 @@
-import os
-import json
 import hashlib
+import json
+import logging
 import math
-from typing import Dict, Any
-from tools.market_data import fetch_multi_timeframe_candles, fetch_current_price
-from tools.indicators import compute_timeframe_indicators
-from engine.risk import calculate_risk
-from engine.paper_trader import PaperTrader
+from typing import Any, Dict, Optional
+
+import pandas as pd
+
 from chain.logger import log_decision_record
-from engine.risk import load_config
+from agents.model_registry import load_active_model
+from engine.paper_trader import PaperTrader
+from engine.risk import calculate_risk, load_config
+from research.features import build_features
+from tools.indicators import compute_timeframe_indicators
+from tools.market_data import (
+    fetch_best_bid_ask,
+    fetch_current_price,
+    fetch_multi_timeframe_candles,
+)
 
-SYSTEM_PROMPT = """You are Mortis, an autonomous Bitcoin paper-trading analyst agent. You analyze live BTC/USDT market data and make simulated paper-trading decisions. You never trade real money.
-
-Rules:
-1. Read the market snapshot top-down: 4h = trend direction, 1h = setup quality, 15m = entry timing. Prefer trades aligned with the 4h trend. If timeframes conflict or setup is weak, output direction = "neutral".
-   Respond to the user's focus in the rationale when practical, but base the trade direction on market evidence rather than a requested outcome. Be clear, energetic, and practical without overstating certainty.
-2. You output ONLY JSON matching this format:
-{
-  "direction": "long" | "short" | "neutral",
-  "confidence": 0.0 - 1.0,
-  "rationale": "Max 3 concise sentences summarizing key indicator alignment."
-}
-3. Confidence guide: below 0.55 = weak, 0.55-0.69 = modest setup, 0.70-0.84 = solid, 0.85+ = unusually strong; confidence is a model rating, not a probability. Never exceed 0.95.
-4. Never calculate stop-loss, take-profit or position size yourself; the system computes them.
-5. Be honest and objective."""
 
 class TAAgent:
-    def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        self.paper_trader = PaperTrader()
+    def __init__(self, paper_trader: Optional[PaperTrader] = None):
+        self.paper_trader = paper_trader
 
-    def _fallback_deterministic_analysis(self, snapshot: Dict[str, Any], reason: str) -> Dict[str, Any]:
-        """Deterministic TA evaluation fallback when Gemini API key is missing or unauthenticated"""
-        ind_4h = snapshot["timeframes"]["4h"]
-        ind_1h = snapshot["timeframes"]["1h"]
-        ind_15m = snapshot["timeframes"]["15m"]
+    def _fallback_deterministic_analysis(
+        self, snapshot: Dict[str, Any], reason: str
+    ) -> Dict[str, Any]:
+        indicators = snapshot["timeframes"]
+        ind_4h = indicators["4h"]
+        ind_1h = indicators["1h"]
+        ind_15m = indicators["15m"]
 
-        # 4h Trend
-        bullish_4h = ind_4h["trend_flags"]["price_above_ema50"] and ind_4h["trend_flags"]["ema20_above_ema50"]
-        bearish_4h = not ind_4h["trend_flags"]["price_above_ema50"] and not ind_4h["trend_flags"]["ema20_above_ema50"]
-
-        # 1h Setup
+        bullish_4h = (
+            ind_4h["trend_flags"]["price_above_ema50"]
+            and ind_4h["trend_flags"]["ema20_above_ema50"]
+        )
+        bearish_4h = (
+            not ind_4h["trend_flags"]["price_above_ema50"]
+            and not ind_4h["trend_flags"]["ema20_above_ema50"]
+        )
         rsi_1h = ind_1h["rsi14"]
         macd_rising_15m = ind_15m["macd"]["histogram_rising"]
 
-        direction = "neutral"
-        confidence = 0.50
-
         if bullish_4h and rsi_1h < 65 and macd_rising_15m:
             direction = "long"
-            confidence = 0.65
-            rationale = f"4h EMA trend bullish, 1h RSI ({rsi_1h:.1f}) in buy zone, 15m MACD momentum rising. ({reason})"
+            rationale = (
+                f"4h EMA trend bullish, 1h RSI ({rsi_1h:.1f}) in buy zone, "
+                f"15m MACD momentum rising. ({reason})"
+            )
         elif bearish_4h and rsi_1h > 35 and not macd_rising_15m:
             direction = "short"
-            confidence = 0.65
-            rationale = f"4h EMA trend bearish, 1h RSI ({rsi_1h:.1f}) in sell zone, 15m MACD momentum declining. ({reason})"
+            rationale = (
+                f"4h EMA trend bearish, 1h RSI ({rsi_1h:.1f}) in sell zone, "
+                f"15m MACD momentum declining. ({reason})"
+            )
         else:
-            rationale = f"Timeframe confluence weak or 4h trend neutral; maintaining neutral stance. ({reason})"
-
+            direction = "neutral"
+            rationale = f"Timeframe confluence weak; maintaining neutral stance. ({reason})"
         return {
             "direction": direction,
-            "confidence": confidence,
-            "rationale": rationale
+            "confidence": 0.65 if direction != "neutral" else 0.50,
+            "rationale": rationale,
+            "source": "deterministic_rule_fallback",
+            "calibrated": False,
         }
 
-    def analyze_and_trade(self, user_message: str = "") -> Dict[str, Any]:
-        """Fetch market snapshot, query Gemini TA agent (or fallback rules), run risk engine, log & execute paper trade"""
-        price = fetch_current_price("BTCUSDT")
-        tf_candles = fetch_multi_timeframe_candles("BTCUSDT", ["4h", "1h", "15m"])
-
-        ind_4h = compute_timeframe_indicators(tf_candles["4h"])
-        ind_1h = compute_timeframe_indicators(tf_candles["1h"])
-        ind_15m = compute_timeframe_indicators(tf_candles["15m"])
+    def analyze(self, user_message: str = "") -> Dict[str, Any]:
+        """Return an analysis and paper plan without writing a decision or opening a trade."""
+        del user_message
+        config = load_config()
+        active_model = load_active_model(config)
+        timeframes = config.get("timeframes", ["4h", "1h", "15m"])
+        candles_per_timeframe = int(config.get("candles_per_timeframe", 300))
+        symbol = str(config.get("symbol", "BTCUSDT"))
+        price = fetch_current_price(symbol)
+        tf_candles = fetch_multi_timeframe_candles(
+            symbol, timeframes, limit=candles_per_timeframe
+        )
+        indicators = {
+            timeframe: compute_timeframe_indicators(tf_candles[timeframe])
+            for timeframe in timeframes
+        }
+        required_timeframes = {"4h", "1h", "15m"}
+        if not required_timeframes.issubset(indicators):
+            raise ValueError("The deterministic strategy requires 4h, 1h, and 15m timeframes.")
 
         snapshot = {
-            "symbol": "BTCUSDT",
+            "symbol": symbol,
             "price": price,
-            "timeframes": {
-                "4h": ind_4h,
-                "1h": ind_1h,
-                "15m": ind_15m
-            }
+            "timeframes": indicators,
+        }
+        candle_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    timeframe: tf_candles[timeframe][["open_time", "close"]]
+                    .tail(5)
+                    .to_dict(orient="records")
+                    for timeframe in timeframes
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        decision_timeframe = (
+            active_model.decision_timeframe if active_model is not None else "15m"
+        )
+        if decision_timeframe not in tf_candles:
+            raise ValueError(
+                f"Active model timeframe {decision_timeframe!r} is unavailable."
+            )
+        feature_frame = build_features(
+            tf_candles, decision_timeframe=decision_timeframe
+        )
+        features_row = feature_frame.iloc[-1].drop(labels=["closed_at"])
+        feature_vector = {
+            name: float(value)
+            for name, value in features_row.items()
+            if pd.notna(value) and math.isfinite(float(value))
         }
 
-        # SHA-256 digest of candles
-        candles_summary = json.dumps({
-            "4h": tf_candles["4h"][["open_time", "close"]].tail(5).to_dict(orient="records"),
-            "1h": tf_candles["1h"][["open_time", "close"]].tail(5).to_dict(orient="records"),
-            "15m": tf_candles["15m"][["open_time", "close"]].tail(5).to_dict(orient="records"),
-        }, sort_keys=True)
-        candles_digest = hashlib.sha256(candles_summary.encode("utf-8")).hexdigest()
-
-        agent_decision = None
-
-        # Attempt Gemini API Call if key exists and starts with valid format
-        if self.api_key and len(self.api_key) > 10:
-            try:
-                from google import genai
-                from google.genai import types
-
-                client = genai.Client(api_key=self.api_key)
-                prompt = (
-                    f"User's analysis request: {user_message[:1000] or 'Provide a practical market read.'}\n"
-                    f"Analyze this live market snapshot and give your JSON decision:\n"
-                    f"{json.dumps(snapshot, indent=2)}"
+        decision = self._fallback_deterministic_analysis(
+            snapshot,
+            (
+                "no promoted calibrated model is configured"
+                if active_model is None
+                else f"promoted model {active_model.version} is active"
+            ),
+        )
+        decision_margin = float(
+            config.get("model", {}).get("margin_over_breakeven", 0.03)
+        )
+        if active_model is not None:
+            decision_margin = active_model.margin_over_breakeven
+            direction = {"long": 1, "short": -1}.get(decision["direction"])
+            if direction is not None:
+                probability = active_model.probability(feature_vector, direction)
+                decision.update(
+                    {
+                        "confidence": probability,
+                        "calibrated_probability": probability,
+                        "source": f"promoted_model:{active_model.version}",
+                        "calibrated": True,
+                        "rationale": (
+                            f"{decision['rationale']} Promoted model estimates "
+                            f"{probability:.1%} probability of a net-positive outcome."
+                        ),
+                    }
                 )
-                
-                response = client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        temperature=0.2,
-                        response_mime_type="application/json"
-                    )
-                )
-
-                raw_text = response.text.strip() if response.text else "{}"
-                if "```json" in raw_text:
-                    raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in raw_text:
-                    raw_text = raw_text.split("```")[1].split("```")[0].strip()
-
-                agent_decision = json.loads(raw_text)
-                confidence = agent_decision.get("confidence")
-                if (
-                    agent_decision.get("direction") not in ("long", "short", "neutral")
-                    or not isinstance(confidence, (int, float))
-                    or not math.isfinite(confidence)
-                    or not 0.0 <= confidence <= 1.0
-                    or not isinstance(agent_decision.get("rationale"), str)
-                ):
-                    raise ValueError("Gemini returned an invalid decision shape.")
-            except Exception as e:
-                print(f"[Gemini API Notice]: {e}. Using deterministic TA fallback rule engine.")
-                agent_decision = self._fallback_deterministic_analysis(
-                    snapshot, reason="Gemini key unauthenticated or rate-limited"
-                )
-        else:
-            agent_decision = self._fallback_deterministic_analysis(
-                snapshot, reason="No valid GEMINI_API_KEY configured"
+        decision["decision_margin"] = decision_margin
+        account_state = (
+            self.paper_trader.get_state()
+            if self.paper_trader is not None
+            else {
+                "equity": float(config.get("starting_equity_usd", 10000.0)),
+                "open_position": None,
+            }
+        )
+        risk_settings = config.get("risk", {})
+        atr_timeframe = config.get("atr_timeframe", "1h")
+        if atr_timeframe not in indicators:
+            raise ValueError(f"Configured ATR timeframe {atr_timeframe!r} is unavailable.")
+        memory_summary = (
+            self.paper_trader.retrieve_memory(feature_vector, decision["direction"])
+            if self.paper_trader is not None
+            and decision["direction"] in ("long", "short")
+            else {
+                "neighbors": [],
+                "n": 0,
+                "effective_n": 0.0,
+                "shrunk_win_rate": None,
+                "average_r": None,
+                "sufficient": False,
+                "mode": config.get("memory", {}).get("mode", "advisory"),
+            }
+        )
+        calibrated = bool(decision.get("calibrated"))
+        confidence_for_sizing = decision["confidence"]
+        if not calibrated:
+            confidence_for_sizing = float(
+                risk_settings.get("confidence_threshold", 0.55)
             )
-
-        direction = agent_decision.get("direction", "neutral")
-        confidence = float(agent_decision.get("confidence", 0.5))
-        rationale = agent_decision.get("rationale", "")
-
-        # Settle paper account & check guards
-        self.paper_trader.settle_open_position(price)
-        account_state = self.paper_trader.get_state()
-        guard = self.paper_trader.is_trading_blocked()
-        config = load_config()
-        atr_1h = ind_1h["atr14"]
         trade_plan = calculate_risk(
-            direction=direction,
-            confidence=confidence,
+            direction=decision["direction"],
+            confidence=confidence_for_sizing,
             price=price,
-            atr=atr_1h,
+            atr=indicators[atr_timeframe]["atr14"],
             equity=account_state["equity"],
             config=config,
             leverage=None,
         )
-        leverage = trade_plan.leverage
-
-        final_action = trade_plan.action
-        reason_if_no_trade = trade_plan.reason_if_no_trade
-
-        if final_action != "no_trade":
-            if guard["blocked"]:
-                final_action = "no_trade"
-                reason_if_no_trade = guard["reason"]
-
-        trade_plan_dict = {
-            "action": final_action,
-            "reason_if_no_trade": reason_if_no_trade,
+        plan = {
+            "action": trade_plan.action,
+            "reason_if_no_trade": trade_plan.reason_if_no_trade,
             "raw_confidence": trade_plan.raw_confidence,
             "clamped_confidence": trade_plan.clamped_confidence,
             "entry": trade_plan.entry,
@@ -185,46 +201,174 @@ class TAAgent:
             "risk_amount_usd": trade_plan.risk_amount_usd,
             "size_multiplier": trade_plan.size_multiplier,
             "leverage": trade_plan.leverage,
-            "flags": trade_plan.flags
+            "expected_cost_r": trade_plan.expected_cost_r,
+            "breakeven_probability": trade_plan.breakeven_probability,
+            "required_probability": (
+                trade_plan.breakeven_probability
+                + decision_margin
+                if trade_plan.breakeven_probability is not None
+                else None
+            ),
+            "flags": trade_plan.flags,
+            "atr_at_entry": indicators[atr_timeframe]["atr14"],
+            "sl_atr_mult": risk_settings.get("sl_atr_mult", 1.5),
+            "tp_atr_mult": risk_settings.get("tp_atr_mult", 2.5),
         }
-
-        # Log decision with canonical SHA-256 hash
-        record = log_decision_record(
-            price=price,
-            candles_digest=candles_digest,
-            raw_direction=direction,
-            rationale=rationale,
-            trade_plan=trade_plan_dict,
-            risk_checks={
-                "threshold_ok": final_action != "no_trade" or "threshold" not in (reason_if_no_trade or ""),
-                "open_positions_ok": not bool(account_state.get("open_position")),
-                "daily_loss_ok": not (
-                    guard["blocked"] and "Daily loss limit" in guard.get("reason", "")
+        memory_action = {"veto": False, "size_multiplier": 1.0, "reason": None}
+        memory_settings = config.get("memory", {})
+        if (
+            memory_settings.get("mode", "advisory") == "gate"
+            and plan["action"] != "no_trade"
+        ):
+            memory_action = memory_gate(
+                memory_summary,
+                plan["breakeven_probability"],
+                veto_gap=float(memory_settings.get("veto_gap", 0.1)),
+                min_size_multiplier=float(
+                    memory_settings.get("min_size_multiplier", 0.5)
                 ),
-                "notional_cap_ok": "capped_by_notional" not in trade_plan.flags
-            },
-            model_id=self.model_name,
-            leverage=leverage,
-        )
-
-        if final_action != "no_trade":
-            self.paper_trader.open_position(
-                decision_id=record["decision_id"],
-                side=final_action,
-                entry=trade_plan.entry,
-                size_btc=trade_plan.size_btc,
-                stop_loss=trade_plan.stop_loss,
-                take_profit=trade_plan.take_profit,
-                initial_risk_usd=trade_plan.risk_amount_usd,
-                leverage=leverage,
-                source="ai",
-                rationale=rationale,
             )
+            if memory_action["veto"]:
+                plan["action"] = "no_trade"
+                plan["reason_if_no_trade"] = "memory_veto"
+            elif memory_action["size_multiplier"] < 1:
+                multiplier = min(1.0, float(memory_action["size_multiplier"]))
+                plan["size_btc"] = round(plan["size_btc"] * multiplier, 8)
+                plan["notional_usd"] = round(plan["notional_usd"] * multiplier, 2)
+                plan["risk_amount_usd"] = round(
+                    plan["risk_amount_usd"] * multiplier, 2
+                )
+                plan["size_multiplier"] = round(
+                    plan["size_multiplier"] * multiplier, 4
+                )
+                plan["flags"].append("memory_size_reduced")
+        plan["memory_action"] = memory_action
+        if (
+            active_model is not None
+            and plan["action"] != "no_trade"
+            and plan["required_probability"] is not None
+            and decision.get("calibrated_probability", 0.0)
+            <= plan["required_probability"]
+        ):
+            plan["action"] = "no_trade"
+            plan["reason_if_no_trade"] = (
+                "Promoted model probability does not exceed estimated breakeven "
+                "by the configured margin."
+            )
+        guard = (
+            self.paper_trader.is_trading_blocked()
+            if self.paper_trader is not None
+            else {"blocked": False}
+        )
+        if plan["action"] != "no_trade" and guard["blocked"]:
+            plan["action"] = "no_trade"
+            plan["reason_if_no_trade"] = guard["reason"]
 
         return {
             "snapshot": snapshot,
-            "agent_decision": agent_decision,
-            "trade_plan": trade_plan_dict,
-            "decision_record": record,
-            "account": self.paper_trader.get_state()
+            "agent_decision": decision,
+            "trade_plan": plan,
+            "decision_record": None,
+            "account": account_state,
+            "config": config,
+            "feature_vector": feature_vector,
+            "memory_summary": memory_summary,
+            "candles_digest": candle_digest,
+            "risk_checks": {
+                "threshold_ok": plan["action"] != "no_trade",
+                "open_positions_ok": not bool(account_state.get("open_position")),
+                "account_guard_ok": not guard["blocked"],
+            },
         }
+
+    def execute(self, user_message: str = "") -> Dict[str, Any]:
+        """Persist an analysis and execute its plan in the local paper account."""
+        if self.paper_trader is None:
+            self.paper_trader = PaperTrader()
+        result = self.analyze(user_message)
+        decision = result["agent_decision"]
+        plan = result["trade_plan"]
+        config = result["config"]
+        quote = None
+        quote_status = "unavailable"
+        try:
+            quote = fetch_best_bid_ask(str(config.get("symbol", "BTCUSDT")))
+            quote_status = "captured"
+        except RuntimeError as error:
+            logging.warning("Training sample has no best bid/ask quote: %s", error)
+        record = log_decision_record(
+            price=result["snapshot"]["price"],
+            candles_digest=result["candles_digest"],
+            raw_direction=decision["direction"],
+            rationale=decision["rationale"],
+            trade_plan=plan,
+            risk_checks=result["risk_checks"],
+            model_id=decision["source"],
+            leverage=plan["leverage"],
+            config_snapshot=config,
+            feature_vector=result["feature_vector"],
+            model_version=config.get("model", {}).get("active_version"),
+            calibrated_probability=decision.get("calibrated_probability"),
+            breakeven_probability=plan.get("breakeven_probability"),
+            decision_margin=decision.get(
+                "decision_margin",
+                config.get("model", {}).get("margin_over_breakeven", 0.03),
+            ),
+            memory_summary=result["memory_summary"],
+        )
+        self.paper_trader.record_training_sample(
+            decision_id=record["decision_id"],
+            features=result["feature_vector"],
+            decision={
+                **decision,
+                "trade_plan": plan,
+                "model_version": config.get("model", {}).get("active_version"),
+                "quote_status": quote_status,
+                "memory_summary": result["memory_summary"],
+                "indicator_snapshot": result["snapshot"]["timeframes"],
+            },
+            best_bid=quote["best_bid"] if quote else None,
+            best_ask=quote["best_ask"] if quote else None,
+            quote_status=quote_status,
+        )
+        self.paper_trader.record_decision(
+            record=record,
+            direction=decision["direction"],
+            source=decision["source"],
+            confidence=decision["confidence"],
+            calibrated_probability=decision.get("calibrated_probability"),
+            feature_vector=result["feature_vector"],
+            indicator_snapshot=result["snapshot"]["timeframes"],
+            trade_plan=plan,
+            memory=result["memory_summary"],
+            counterfactual=(
+                plan["action"] == "no_trade"
+                and decision["direction"] in ("long", "short")
+            ),
+        )
+        if plan["action"] != "no_trade":
+            self.paper_trader.open_position(
+                decision_id=record["decision_id"],
+                side=plan["action"],
+                entry=plan["entry"],
+                size_btc=plan["size_btc"],
+                stop_loss=plan["stop_loss"],
+                take_profit=plan["take_profit"],
+                initial_risk_usd=plan["risk_amount_usd"],
+                leverage=plan["leverage"],
+                source="ai",
+                rationale=decision["rationale"],
+                atr_at_entry=plan["atr_at_entry"],
+                sl_atr_mult=float(plan["sl_atr_mult"]),
+                tp_atr_mult=float(plan["tp_atr_mult"]),
+                confidence=decision["confidence"],
+                feature_vector=result["feature_vector"],
+                decision_source=decision["source"],
+            )
+        result["decision_record"] = record
+        result["account"] = self.paper_trader.get_state()
+        return result
+
+    def analyze_and_trade(self, user_message: str = "") -> Dict[str, Any]:
+        """Compatibility entry point for autonomous paper trading."""
+        return self.execute(user_message)

@@ -11,10 +11,14 @@ from agents.ta_agent import TAAgent
 from engine.paper_trader import PaperTrader
 from tools.market_data import fetch_current_price
 
-def run_single_cycle():
+def run_single_cycle(trader: PaperTrader | None = None):
     """Run one 15-minute strategy evaluation cycle"""
     print(f"\n[Mortis Cycle] Starting analysis at {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}...")
-    agent = TAAgent()
+    trader = trader or PaperTrader()
+    catchup = trader.catch_up()
+    if catchup.get("closed_positions") or catchup.get("resolved_samples"):
+        print(f"-> Catch-up: {catchup}")
+    agent = TAAgent(paper_trader=trader)
     result = agent.analyze_and_trade()
     
     rec = result["decision_record"]
@@ -44,24 +48,26 @@ def run_loop(
     print("=========================================")
     trader = PaperTrader()
     stop_event = stop_event or threading.Event()
+    try:
+        while not stop_event.is_set():
+            try:
+                run_single_cycle(trader)
+                start_time = time.time()
+                while time.time() - start_time < interval_sec and not stop_event.is_set():
+                    if stop_event.wait(poll_sec):
+                        break
+                    price = fetch_current_price("BTCUSDT")
+                    trader.settle_open_position(price)
 
-    while not stop_event.is_set():
-        try:
-            run_single_cycle()
-            start_time = time.time()
-            while time.time() - start_time < interval_sec and not stop_event.is_set():
-                if stop_event.wait(poll_sec):
-                    break
-                price = fetch_current_price("BTCUSDT")
-                trader.settle_open_position(price)
-                
-        except KeyboardInterrupt:
-            print("\n[Mortis Engine] Shutdown requested.")
-            break
-        except Exception as e:
-            logging.exception("[Mortis Engine] Autonomous cycle failed")
-            if stop_event.wait(10):
+            except KeyboardInterrupt:
+                print("\n[Mortis Engine] Shutdown requested.")
                 break
+            except Exception:
+                logging.exception("[Mortis Engine] Autonomous cycle failed")
+                if stop_event.wait(10):
+                    break
+    finally:
+        trader.record_heartbeat()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mortis Trading Engine")

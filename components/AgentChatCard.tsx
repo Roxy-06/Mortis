@@ -36,12 +36,10 @@ interface LedgerEvent {
 }
 
 interface AgentChatCardProps {
-  onAccountChanged?: () => void;
   currentCapital?: number;
 }
 
 export function AgentChatCard({
-  onAccountChanged,
   currentCapital = 10000,
 }: AgentChatCardProps) {
   const [activeTab, setActiveTab] = useState<'chat' | 'ledger'>('chat');
@@ -133,10 +131,6 @@ export function AgentChatCard({
             : undefined,
         },
       ]);
-      if (isTrade) {
-        onAccountChanged?.();
-        void loadLedger();
-      }
     } catch (error) {
       setMessages((previous) => [
         ...previous,
@@ -212,7 +206,7 @@ export function AgentChatCard({
                   <span className="whitespace-pre-wrap text-sm">{message.text}</span>
                   {message.tradeData && (
                     <div className="mt-2 space-y-0.5 border-t border-[#18261f] pt-1.5 font-mono text-[10px]">
-                      <div className="font-bold text-[#b5f542]">PAPER POSITION OPENED · {message.tradeData.leverage}x</div>
+                      <div className="font-bold text-[#b5f542]">PAPER TRADE PROPOSAL · {message.tradeData.leverage}x</div>
                       <div className="text-white">
                         {message.tradeData.action} {message.tradeData.size} BTC @ ${message.tradeData.entry.toLocaleString()}
                       </div>

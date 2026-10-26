@@ -4,33 +4,71 @@ import math
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
-LEVERAGE_OPTIONS = (1, 5, 10, 20, 100, 200)
-LEVERAGE_CONFIDENCE_TIERS = (
-    (0.95, 200),
-    (0.90, 100),
-    (0.85, 20),
-    (0.80, 10),
-    (0.70, 5),
-    (0.55, 1),
-)
+LEVERAGE_OPTIONS = tuple(range(1, 6))
 
 def load_config() -> Dict[str, Any]:
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
+        if not isinstance(config, dict):
+            raise ValueError("config.yaml must contain a mapping.")
+        return config
     return {
-        "confidence_threshold": 0.55,
-        "confidence_cap": 0.95,
-        "base_risk_pct": 0.0075,
-        "max_size_multiplier": 1.5,
-        "max_notional_pct": 0.50,
-        "max_leverage": 200,
-        "sl_atr_mult": 1.5,
-        "tp_atr_mult": 2.5,
-        "slippage_pct": 0.0005,
-        "fee_pct_round_trip": 0.001,
+        "symbol": "BTCUSDT",
+        "timeframes": ["4h", "1h", "15m"],
+        "candles_per_timeframe": 300,
+        "atr_timeframe": "1h",
+        "starting_equity_usd": 10000.0,
+        "risk": {
+            "confidence_threshold": 0.55,
+            "confidence_cap": 0.95,
+            "default_leverage": 2,
+            "max_leverage": 5,
+            "base_risk_pct": 0.0025,
+            "max_size_multiplier": 1.0,
+            "max_notional_pct": 0.5,
+            "max_open_positions": 1,
+            "max_daily_loss_pct": 0.03,
+            "max_consecutive_losses": 3,
+            "loss_cooldown_hours": 24,
+            "max_drawdown_pct": 0.10,
+            "max_holding_bars": 48,
+            "sl_atr_mult": 1.5,
+            "tp_atr_mult": 2.5,
+            "fee_pct_round_trip": 0.001,
+        },
+        "backtest": {
+            "fee_per_side_pct": 0.0005,
+            "slippage_pct": 0.0005,
+            "include_funding": True,
+            "intrabar_conflict": "stop_first",
+        },
+        "model": {
+            "active_version": None,
+            "margin_over_breakeven": 0.03,
+            "kelly_fraction_cap": 0.25,
+            "retrain_interval_days": 30,
+        },
+        "monitoring": {
+            "rolling_trades_window": 30,
+            "min_rolling_expectancy_r": 0.0,
+        },
     }
+
+
+def risk_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return risk settings while accepting legacy flat settings from callers."""
+    nested = config.get("risk", {})
+    backtest = config.get("backtest", {})
+    flattened = {**config, **(nested if isinstance(nested, dict) else {})}
+    if isinstance(backtest, dict):
+        flattened.setdefault("slippage_pct", backtest.get("slippage_pct", 0.0005))
+        flattened.setdefault(
+            "fee_pct_round_trip",
+            2 * float(backtest.get("fee_per_side_pct", 0.0005)),
+        )
+    return flattened
 
 @dataclass
 class TradePlan:
@@ -46,6 +84,8 @@ class TradePlan:
     risk_amount_usd: float
     size_multiplier: float
     leverage: int
+    expected_cost_r: Optional[float] = None
+    breakeven_probability: Optional[float] = None
     flags: List[str] = field(default_factory=list)
 
 def calculate_risk(
@@ -55,20 +95,21 @@ def calculate_risk(
     atr: float,
     equity: float,
     config: Optional[Dict[str, Any]] = None,
-    leverage: Optional[int] = 1,
+    leverage: Optional[int] = None,
 ) -> TradePlan:
     """Pure Python risk calculation engine"""
     if config is None:
         config = load_config()
+    config = risk_config(config)
 
-    max_leverage = int(config.get("max_leverage", 200))
+    max_leverage = int(config.get("max_leverage", 5))
     if leverage is not None and (
-        int(leverage) not in LEVERAGE_OPTIONS or int(leverage) > max_leverage
+        int(leverage) < 1 or int(leverage) > max_leverage
     ):
         raise ValueError(
-            "Leverage must be one of 1x, 5x, 10x, 20x, 100x, or 200x."
+            f"Leverage must be between 1x and {max_leverage}x."
         )
-    reported_leverage = int(leverage or 1)
+    reported_leverage = int(leverage or config.get("default_leverage", 2))
 
     flags = []
     raw_conf = confidence
@@ -150,11 +191,12 @@ def calculate_risk(
 
     stop_loss = entry - sl_dist if direction == "long" else entry + sl_dist
     take_profit = entry + tp_dist if direction == "long" else entry - tp_dist
-    if tp_dist <= entry * fee_pct:
+    total_cost_pct = fee_pct + 2 * slippage
+    if tp_dist <= entry * total_cost_pct:
         return TradePlan(
             action="no_trade",
             reason_if_no_trade=(
-                f"Expected take-profit move does not cover the {fee_pct:.0%} round-trip fee."
+                "Expected take-profit move does not cover estimated fees and slippage."
             ),
             raw_confidence=raw_conf,
             clamped_confidence=conf,
@@ -169,22 +211,16 @@ def calculate_risk(
             flags=["fee_exceeds_take_profit"]
         )
 
-    selected_leverage = (
-        int(leverage)
-        if leverage is not None
-        else select_leverage(conf, sl_dist, entry, config)
+    selected_leverage = int(leverage) if leverage is not None else select_leverage(
+        sl_dist, entry, config
     )
-    confidence_tier = next(
-        (tier for minimum, tier in LEVERAGE_CONFIDENCE_TIERS if conf >= minimum),
-        1,
-    )
-    if leverage is None and selected_leverage < confidence_tier:
+    if selected_leverage < reported_leverage:
         flags.append("leverage_reduced_for_stop")
 
     # Size multiplier
     size_mult = min(max_size_mult, max(1.0, 1.0 + 0.5 * (conf - conf_thresh) / (1.0 - conf_thresh)))
     risk_budget = equity * base_risk * size_mult
-    risk_per_btc = sl_dist + entry * fee_pct
+    risk_per_btc = sl_dist + entry * total_cost_pct
     size_btc = risk_budget / risk_per_btc
     notional = size_btc * entry
 
@@ -197,6 +233,9 @@ def calculate_risk(
     size_btc = math.floor(size_btc * 100_000_000) / 100_000_000
     notional = size_btc * entry
     risk_amount = size_btc * risk_per_btc
+    cost_r = entry * total_cost_pct / sl_dist
+    reward_r = tp_mult / sl_mult
+    breakeven_probability = (1 + cost_r) / (1 + reward_r)
 
     return TradePlan(
         action=direction,
@@ -211,29 +250,29 @@ def calculate_risk(
         risk_amount_usd=round(risk_amount, 2),
         size_multiplier=round(size_mult, 2),
         leverage=selected_leverage,
+        expected_cost_r=round(cost_r, 6),
+        breakeven_probability=round(breakeven_probability, 6),
         flags=flags
     )
 
 
 def select_leverage(
-    confidence: float,
     stop_distance: float,
     entry: float,
     config: Optional[Dict[str, Any]] = None,
 ) -> int:
-    """Choose confidence-tier leverage with a buffer before simulated liquidation."""
+    """Apply the configured fixed leverage with a buffer before simulated liquidation."""
     if config is None:
         config = load_config()
-    confidence = min(float(confidence), float(config.get("confidence_cap", 0.95)))
-    desired = next(
-        (tier for minimum, tier in LEVERAGE_CONFIDENCE_TIERS if confidence >= minimum),
-        1,
-    )
-    max_leverage = int(config.get("max_leverage", 200))
+    config = risk_config(config)
+    desired = int(config.get("default_leverage", 2))
+    max_leverage = int(config.get("max_leverage", 5))
+    if desired < 1 or desired > max_leverage:
+        raise ValueError("Configured default_leverage must be between 1 and max_leverage.")
     safe_maximum = (
         math.floor(entry / (stop_distance * 1.25))
         if entry > 0 and stop_distance > 0
         else 1
     )
     ceiling = min(desired, max_leverage, safe_maximum)
-    return max((value for value in LEVERAGE_OPTIONS if value <= ceiling), default=1)
+    return max(1, ceiling)

@@ -65,7 +65,7 @@ export function RiskAnalysisCard({
         </div>
         <div className="grid grid-cols-3 gap-1 border-t border-[#18261f] pt-2 text-center text-[9px]">
           <div>
-            <span className="block text-[#7f9389]">CLOSED</span>
+            <span className="block text-[#7f9389]">            TRADES</span>
             <span className="text-[11px] font-bold text-white">{totalTrades}</span>
           </div>
           <div>
@@ -92,11 +92,11 @@ export function RiskAnalysisCard({
         </div>
         <div className="flex justify-between gap-2">
           <span className="text-[#7f9389]">Leverage ceiling</span>
-          <span className="text-white">10x isolated margin</span>
+          <span className="text-white">Up to 5x · paper only</span>
         </div>
         <div className="flex justify-between gap-2">
           <span className="text-[#7f9389]">Round-trip fee</span>
-          <span className="text-white">3% of entry notional</span>
+          <span className="text-white">0.1% of entry notional</span>
         </div>
         <div className="flex justify-between gap-2">
           <span className="text-[#7f9389]">Daily loss stop</span>

@@ -3,6 +3,7 @@ import json
 import hashlib
 import time
 import uuid
+import subprocess
 from typing import Dict, Any, Optional
 
 def canonicalize_json(data: Dict[str, Any]) -> str:
@@ -37,37 +38,54 @@ def log_decision_record(
     risk_checks: Dict[str, bool],
     model_id: str = "gemini-2.5-flash",
     leverage: int = 1,
+    config_snapshot: Optional[Dict[str, Any]] = None,
+    feature_vector: Optional[Dict[str, Any]] = None,
+    model_version: Optional[str] = None,
+    calibrated_probability: Optional[float] = None,
+    breakeven_probability: Optional[float] = None,
+    decision_margin: Optional[float] = None,
+    memory_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write decision record to disk with SHA-256 hash and hash chaining"""
+    if config_snapshot is None:
+        from engine.risk import load_config
+
+        config_snapshot = load_config()
     decision_id = f"dec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
     timestamp_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     prev_hash = get_last_decision_hash()
+    try:
+        git_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        git_commit = None
 
     record_no_hash = {
         "schema_version": "1.0",
         "decision_id": decision_id,
         "timestamp_utc": timestamp_utc,
-        "symbol": "BTCUSDT",
+        "symbol": config_snapshot.get("symbol", "BTCUSDT"),
         "model": model_id,
-        "prompt_version": "v1",
-        "config_snapshot": {
-            "symbol": "BTCUSDT",
-            "confidence_threshold": 0.60,
-            "confidence_cap": 0.95,
-            "base_risk_pct": 0.0075,
-            "max_size_multiplier": 1.5,
-            "max_notional_pct": 0.50,
-            "max_open_positions": 1,
-            "max_daily_loss_pct": 0.03,
-            "sl_atr_mult": 1.5,
-            "tp_atr_mult": 2.5,
-            "fee_pct_round_trip": 0.03,
-            "slippage_pct": 0.0005,
-            "leverage": leverage
-        },
+        "prompt_version": config_snapshot.get("prompt_version", "v1"),
+        "config_snapshot": config_snapshot,
+        "git_commit": git_commit,
         "inputs": {
             "price": price,
             "candles_digest": candles_digest
+        },
+        "learning": {
+            "features": feature_vector or {},
+            "model_version": model_version,
+            "calibrated_probability": calibrated_probability,
+            "breakeven_probability": breakeven_probability,
+            "margin_over_breakeven": decision_margin,
+            "historical_analogs": memory_summary or {},
         },
         "agent_outputs": [
             {
@@ -88,8 +106,10 @@ def log_decision_record(
             "take_profit": trade_plan["take_profit"],
             "size_btc": trade_plan["size_btc"],
             "risk_amount_usd": trade_plan["risk_amount_usd"],
-            "leverage": leverage,
+            "leverage": trade_plan["leverage"],
             "notional_usd": trade_plan["notional_usd"],
+            "expected_cost_r": trade_plan.get("expected_cost_r"),
+            "breakeven_probability": trade_plan.get("breakeven_probability"),
             "flags": trade_plan.get("flags", [])
         } if trade_plan["action"] != "no_trade" else None,
         "risk_checks": risk_checks,

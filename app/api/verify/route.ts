@@ -1,55 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
-import crypto from 'crypto';
 
 export async function POST(request: NextRequest) {
-  let body: any = {};
+  let body: unknown;
   try {
     body = await request.json();
-  } catch (_e) {
-    body = {};
+  } catch {
+    return NextResponse.json({ detail: 'Request body must be valid JSON.' }, { status: 400 });
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return NextResponse.json({ detail: 'Request body must be a JSON object.' }, { status: 400 });
   }
 
-  const { decision_id, record_json } = body;
-
-  // 1. Try Python backend
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
-    const pyResp = await fetch('http://localhost:8000/api/verify', {
+    const response = await fetch('http://localhost:8000/api/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    const payload: unknown = await response.json();
+    return NextResponse.json(payload, { status: response.status });
+  } catch (error) {
+    console.error('Mortis verification backend is unavailable:', error);
+    return NextResponse.json(
+      {
+        valid: false,
+        status: 'backend_unavailable',
+        detail: 'Decision verification requires the Python backend.',
+      },
+      { status: 503 },
+    );
+  } finally {
     clearTimeout(timeoutId);
-
-    if (pyResp.ok) {
-      const data = await pyResp.json();
-      return NextResponse.json(data);
-    }
-  } catch (_err) {
-    // Backend offline, fallback to node crypto verification
   }
-
-  // 2. Client-side / Node cryptographic SHA-256 verification fallback
-  const targetId = decision_id || `dec_${Date.now()}_audit`;
-  const canonicalString = JSON.stringify({
-    decision_id: targetId,
-    timestamp_utc: new Date().toISOString(),
-    action: record_json?.trade_plan?.action || 'long',
-    confidence: record_json?.trade_plan?.clamped_confidence || 0.74,
-  });
-
-  const computedHash = crypto.createHash('sha256').update(canonicalString).digest('hex');
-
-  return NextResponse.json({
-    decision_id: targetId,
-    stored_hash: computedHash,
-    computed_hash: computedHash,
-    valid: true,
-    previous_decision_hash: crypto.createHash('sha256').update(targetId + '_prev').digest('hex'),
-    timestamp_utc: new Date().toISOString(),
-    action: record_json?.trade_plan?.action || 'long',
-    canonical_payload: canonicalString
-  });
 }

@@ -11,6 +11,8 @@ import { BitcoinNewsCard } from '../components/BitcoinNewsCard';
 import { AgentChatCard } from '../components/AgentChatCard';
 import { AlgorithmicModal } from '../components/AlgorithmicModal';
 import { ManualTradePanel, type OpenPosition } from '../components/ManualTradePanel';
+import { TradeHistoryCard } from '../components/TradeHistoryCard';
+import { MemoryLearningCard } from '../components/MemoryLearningCard';
 import type { CandleData } from '../components/BalanceChartCard';
 import { type TimeframeIndicators } from '../components/TimeframeBarsCard';
 
@@ -238,8 +240,10 @@ export default function Home() {
 
             </div>
 
+            <TradeHistoryCard />
+            <MemoryLearningCard />
+
             <AgentChatCard
-              onAccountChanged={syncAccountData}
               currentCapital={currentCapital}
             />
           </div>

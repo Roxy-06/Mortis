@@ -21,6 +21,9 @@ __pycache__/
 # Runtime data directory (decisions, paper account state)
 data/
 decisions/
+research_data/
+models/
+research/reports/
 
 # Logs & temp files
 *.log

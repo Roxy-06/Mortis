@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useMemo } from 'react';
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  ChevronDown, 
-  LineChart as LineIcon, 
+import { useMemo, useRef, useState } from 'react';
+import {
+  ArrowRight,
   CandlestickChart as CandleIcon,
-  Columns
+  Columns,
+  LineChart as LineIcon,
+  TrendingDown,
+  TrendingUp,
 } from 'lucide-react';
 
 export interface EquityPoint {
@@ -34,63 +34,62 @@ interface BalanceChartCardProps {
 }
 
 export function BalanceChartCard({
-  currentCapital = 10000.00,
-  initialCapital = 10000.00,
+  currentCapital = 10000,
+  initialCapital = 10000,
   currentBtcPrice = 0,
   marketCandles = [],
-  equityHistory
+  equityHistory,
 }: BalanceChartCardProps) {
   const [displayMode, setDisplayMode] = useState<'curve' | 'candles' | 'dual'>('curve');
-  const [timeframe, setTimeframe] = useState('6 Month');
-  const [showTfDropdown, setShowTfDropdown] = useState(false);
-  const [hoveredPoint, setHoveredPoint] = useState<EquityPoint | null>(null);
-  const candles = marketCandles;
-
-  const returnPct = (((currentCapital - initialCapital) / initialCapital) * 100).toFixed(2);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const chartScrollRef = useRef<HTMLDivElement>(null);
+  const returnPct = initialCapital > 0
+    ? (((currentCapital - initialCapital) / initialCapital) * 100).toFixed(2)
+    : '0.00';
   const isPositive = currentCapital >= initialCapital;
+  const points = useMemo<EquityPoint[]>(() => (
+    equityHistory?.length
+      ? equityHistory
+      : [
+          { label: 'Starting balance', equity: initialCapital, time: '' },
+          { label: 'Current equity', equity: currentCapital, time: 'Now' },
+        ]
+  ), [equityHistory, initialCapital, currentCapital]);
 
-  // Actual trade equity history points:
-  // If not passed from parent, use standard progression starting at $10,000 up to currentCapital
-  const points: EquityPoint[] = useMemo(() => {
-    if (equityHistory && equityHistory.length > 0) {
-      return equityHistory;
+  const chartWidth = Math.max(760, (points.length - 1) * 48 + 60);
+  const chartHeight = 260;
+
+  const renderCandlesticks = (width = 760, height = chartHeight) => {
+    if (marketCandles.length === 0) {
+      return <p className="py-16 text-center text-xs text-[#7f9389]">Market candles unavailable.</p>;
     }
-    return [
-      { label: 'Starting balance', equity: initialCapital, time: '' },
-      { label: 'Current equity', equity: currentCapital, time: 'Now' },
-    ];
-  }, [equityHistory, currentCapital]);
 
-  const broadWidth = 760;
-  const broadHeight = 260;
-
-  // Render SVG Candlesticks
-  const renderCandlestickView = (customWidth = broadWidth, customHeight = broadHeight) => {
-    if (candles.length === 0) return null;
-    const minP = Math.min(...candles.map(c => c.low)) - 40;
-    const maxP = Math.max(...candles.map(c => c.high)) + 40;
-    const range = maxP - minP || 1;
-    const cWidth = customWidth / candles.length;
-
-    const getY = (val: number) => customHeight - ((val - minP) / range) * (customHeight - 24) - 12;
+    const minPrice = Math.min(...marketCandles.map((candle) => candle.low)) - 40;
+    const maxPrice = Math.max(...marketCandles.map((candle) => candle.high)) + 40;
+    const priceRange = maxPrice - minPrice || 1;
+    const candleWidth = width / marketCandles.length;
+    const getY = (price: number) => height - ((price - minPrice) / priceRange) * (height - 24) - 12;
 
     return (
-      <svg className="w-full h-full" viewBox={`0 0 ${customWidth} ${customHeight}`} preserveAspectRatio="none">
-        {candles.map((c, i) => {
-          const isGreen = c.close >= c.open;
-          const xCenter = i * cWidth + cWidth / 2;
-          const yOpen = getY(c.open);
-          const yClose = getY(c.close);
-          const yHigh = getY(c.high);
-          const yLow = getY(c.low);
-          const bodyY = Math.min(yOpen, yClose);
-          const bodyH = Math.max(Math.abs(yClose - yOpen), 2.5);
-          const bWidth = Math.max(cWidth - 2.5, 2);
-
+      <svg className="h-full w-full" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+        {marketCandles.map((candle, index) => {
+          const isGreen = candle.close >= candle.open;
+          const x = index * candleWidth + candleWidth / 2;
+          const yOpen = getY(candle.open);
+          const yClose = getY(candle.close);
+          const color = isGreen ? '#10b981' : '#ff5c5c';
           return (
-            <g key={i}>
-              <line x1={xCenter} y1={yHigh} x2={xCenter} y2={yLow} stroke={isGreen ? '#10b981' : '#ff5c5c'} strokeWidth="1" />
-              <rect x={xCenter - bWidth / 2} y={bodyY} width={bWidth} height={bodyH} rx="1" fill={isGreen ? '#10b981' : '#ff5c5c'} />
+            <g key={candle.time}>
+              <line x1={x} y1={getY(candle.high)} x2={x} y2={getY(candle.low)} stroke={color} />
+              <rect
+                x={x - Math.max(candleWidth - 2.5, 2) / 2}
+                y={Math.min(yOpen, yClose)}
+                width={Math.max(candleWidth - 2.5, 2)}
+                height={Math.max(Math.abs(yClose - yOpen), 2.5)}
+                rx="1"
+                fill={color}
+              />
             </g>
           );
         })}
@@ -98,269 +97,250 @@ export function BalanceChartCard({
     );
   };
 
-  // Render 100% Dynamically Calibrated Capital Growth Spline Curve
-  const renderSplineCurveView = (customWidth = broadWidth, customHeight = broadHeight) => {
+  const renderEquityCurve = (width = chartWidth, height = chartHeight) => {
     if (points.length === 0) return null;
-
-    // Calculate real dynamic min and max
-    const equities = points.map(p => p.equity);
-    const rawMin = Math.min(...equities, initialCapital);
-    const rawMax = Math.max(...equities, initialCapital);
+    const values = points.map((point) => point.equity);
+    const rawMin = Math.min(...values, initialCapital);
+    const rawMax = Math.max(...values, initialCapital);
     const margin = Math.max((rawMax - rawMin) * 0.25, 100);
-    const minVal = rawMin - margin;
-    const maxVal = rawMax + margin;
-    const valRange = maxVal - minVal || 1;
-
-    // Map each real trade to canvas coordinates
-    const coords = points.map((p, i) => {
-      const x = points.length === 1
-        ? customWidth / 2
-        : (i / (points.length - 1)) * (customWidth - 60) + 30;
-      const y = customHeight - ((p.equity - minVal) / valRange) * (customHeight - 50) - 25;
-      return { x, y, point: p };
-    });
-
-    // Build smooth SVG path string from coordinates
-    let pathD = `M ${coords[0].x},${coords[0].y}`;
-    for (let i = 0; i < coords.length - 1; i++) {
-      const p0 = coords[i];
-      const p1 = coords[i + 1];
-      const midX = (p0.x + p1.x) / 2;
-      pathD += ` C ${midX},${p0.y} ${midX},${p1.y} ${p1.x},${p1.y}`;
+    const minValue = rawMin - margin;
+    const valueRange = rawMax + margin - minValue || 1;
+    const coords = points.map((point, index) => ({
+      x: points.length === 1 ? width / 2 : (index / (points.length - 1)) * (width - 60) + 30,
+      y: height - ((point.equity - minValue) / valueRange) * (height - 50) - 25,
+      point,
+    }));
+    let path = `M ${coords[0].x},${coords[0].y}`;
+    for (let index = 0; index < coords.length - 1; index++) {
+      const current = coords[index];
+      const next = coords[index + 1];
+      const middleX = (current.x + next.x) / 2;
+      path += ` C ${middleX},${current.y} ${middleX},${next.y} ${next.x},${next.y}`;
     }
-
-    const areaD = `${pathD} L ${coords[coords.length - 1].x},${customHeight - 15} L ${coords[0].x},${customHeight - 15} Z`;
+    const area = `${path} L ${coords[coords.length - 1].x},${height - 15} L ${coords[0].x},${height - 15} Z`;
+    const activeIndex = Math.min(hoveredIndex ?? selectedIndex ?? coords.length - 1, coords.length - 1);
+    const activePoint = coords[activeIndex].point;
     const lastCoord = coords[coords.length - 1];
+    const curveColor = isPositive ? '#b5f542' : '#ff5c5c';
 
     return (
-      <div className="relative w-full h-full">
-        {/* Dynamic Glow backdrop positioned on latest trade point */}
-        <div 
-          className="absolute rounded-full pointer-events-none opacity-40 blur-3xl transition-all duration-700"
-          style={{
-            left: `${lastCoord.x - 100}px`,
-            top: `${lastCoord.y - 40}px`,
-            width: '200px',
-            height: '120px',
-            background: isPositive 
-              ? 'radial-gradient(circle, rgba(181, 245, 66, 0.45) 0%, rgba(16, 185, 129, 0.15) 50%, transparent 70%)'
-              : 'radial-gradient(circle, rgba(255, 92, 92, 0.45) 0%, transparent 70%)'
-          }}
-        ></div>
-
-        <svg className="w-full h-full" viewBox={`0 0 ${customWidth} ${customHeight}`} preserveAspectRatio="none">
+      <div className="flex h-full flex-col">
+        <svg
+          className="min-h-0 flex-1"
+          width={width}
+          viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label="Simulated account equity by trade, oldest to newest"
+        >
           <defs>
-            <linearGradient id="realCapGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stopColor={isPositive ? "#b5f542" : "#ff5c5c"} stopOpacity="0.38" />
-              <stop offset="70%" stopColor="#10b981" stopOpacity="0.06" />
-              <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+            <linearGradient id="equityFill" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor={curveColor} stopOpacity="0.3" />
+              <stop offset="72%" stopColor={curveColor} stopOpacity="0.06" />
+              <stop offset="100%" stopColor={curveColor} stopOpacity="0" />
             </linearGradient>
+            <radialGradient id="equityEndGlow">
+              <stop offset="0%" stopColor={curveColor} stopOpacity="0.3" />
+              <stop offset="55%" stopColor={curveColor} stopOpacity="0.12" />
+              <stop offset="100%" stopColor={curveColor} stopOpacity="0" />
+            </radialGradient>
+            <filter id="equityLineGlow" x="-30%" y="-100%" width="160%" height="300%">
+              <feGaussianBlur stdDeviation="4" />
+            </filter>
           </defs>
-
-          {/* Dynamic Grid lines */}
-          <line x1="0" y1="35" x2={customWidth} y2="35" stroke="#16231d" strokeDasharray="3 3" />
-          <line x1="0" y1="95" x2={customWidth} y2="95" stroke="#16231d" strokeDasharray="3 3" />
-          <line x1="0" y1="155" x2={customWidth} y2="155" stroke="#16231d" strokeDasharray="3 3" />
-          <line x1="0" y1="215" x2={customWidth} y2="215" stroke="#16231d" strokeDasharray="3 3" />
-
-          {/* Dynamically Calibrated Area Fill */}
-          <path d={areaD} fill="url(#realCapGradient)" />
-
-          {/* Dynamically Calibrated Spline Curve */}
-          <path
-            d={pathD}
-            fill="none"
-            stroke={isPositive ? "#b5f542" : "#ff5c5c"}
-            strokeWidth="3"
-            className="transition-all duration-500"
+          {[35, 95, 155, 215].map((y) => (
+            <line key={y} x1="0" y1={y} x2={width} y2={y} stroke="#16231d" strokeDasharray="3 3" />
+          ))}
+          <ellipse
+            cx={lastCoord.x}
+            cy={lastCoord.y}
+            rx="115"
+            ry="72"
+            fill="url(#equityEndGlow)"
+            pointerEvents="none"
           />
-
-          {/* Historical Trade Milestone Dots */}
-          {coords.map((c, idx) => (
-            <g 
-              key={idx}
-              onMouseEnter={() => setHoveredPoint(c.point)}
-              onMouseLeave={() => setHoveredPoint(null)}
-              className="cursor-pointer group"
+          <path d={area} fill="url(#equityFill)" />
+          <path
+            d={path}
+            fill="none"
+            stroke={curveColor}
+            strokeWidth="8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity="0.45"
+            filter="url(#equityLineGlow)"
+          />
+          <path
+            d={path}
+            fill="none"
+            stroke={curveColor}
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          {coords.map((coord, index) => (
+            <g
+              key={`${coord.point.label}-${index}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`${coord.point.label}: $${coord.point.equity.toFixed(2)}${coord.point.time ? ` at ${coord.point.time} UTC` : ''}`}
+              onMouseEnter={() => setHoveredIndex(index)}
+              onMouseLeave={() => setHoveredIndex(null)}
+              onFocus={() => setHoveredIndex(index)}
+              onBlur={() => setHoveredIndex(null)}
+              onClick={() => setSelectedIndex((previous) => previous === index ? null : index)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  setSelectedIndex((previous) => previous === index ? null : index);
+                }
+              }}
+              className="cursor-pointer"
             >
+              <circle cx={coord.x} cy={coord.y} r="12" fill="transparent" />
               <circle
-                cx={c.x}
-                cy={c.y}
-                r={idx === coords.length - 1 ? 5.5 : 4}
-                fill={idx === coords.length - 1 ? "#b5f542" : "#10b981"}
-                stroke="#0c1310"
-                strokeWidth="2"
-                className="group-hover:scale-125 transition-transform"
+                cx={coord.x}
+                cy={coord.y}
+                r={index === activeIndex ? 5 : 3.5}
+                fill={curveColor}
+                stroke={index === activeIndex ? '#ffffff' : '#0c1310'}
+                strokeWidth="1.5"
               />
             </g>
           ))}
-
-          {/* Latest Trade Glowing beacon */}
-          <circle cx={lastCoord.x} cy={lastCoord.y} r="9" fill={isPositive ? "#b5f542" : "#ff5c5c"} fillOpacity="0.35" className="animate-ping" />
+          <circle
+            cx={lastCoord.x}
+            cy={lastCoord.y}
+            r="15"
+            fill="none"
+            stroke={curveColor}
+            strokeWidth="1"
+            opacity="0.35"
+            pointerEvents="none"
+          />
         </svg>
-
-        {/* Floating Tooltip displaying Live Calibrated Capital */}
-        <div 
-          className="absolute z-10 transition-all duration-300 pointer-events-none"
-          style={{
-            left: `${lastCoord.x}px`,
-            top: `${Math.max(lastCoord.y - 32, 25)}px`,
-            transform: 'translate(-50%, -50%)'
-          }}
-        >
-          <div className="bg-[#18261f]/95 border border-[#263d32] rounded-2xl py-1.5 px-3 flex items-center space-x-2 shadow-2xl backdrop-blur-md">
-            <span className={`w-4 h-4 rounded-full flex items-center justify-center ${
-              isPositive ? 'bg-[#b5f542]/20 text-[#b5f542]' : 'bg-[#ff5c5c]/20 text-[#ff5c5c]'
-            }`}>
-              {isPositive ? <TrendingUp className="w-2.5 h-2.5" /> : <TrendingDown className="w-2.5 h-2.5" />}
-            </span>
-            <div className="text-left leading-none">
-              <span className="text-xs font-bold text-white font-sans">
-                ${hoveredPoint ? hoveredPoint.equity.toLocaleString() : currentCapital.toLocaleString()}
-              </span>
-              <span className="text-[9px] text-[#7f9389] block mt-0.5">
-                {hoveredPoint ? hoveredPoint.label : 'Live Calibrated Capital'}
-              </span>
-            </div>
-          </div>
+        <div className="flex items-center justify-between gap-3 border-t border-[#18261f] px-2 py-2 text-[10px]">
+          <span className="truncate text-[#7f9389]">
+            {activePoint.label}{activePoint.time ? ` · ${activePoint.time} UTC` : ''}
+          </span>
+          <span className="shrink-0 font-mono font-semibold text-white">
+            ${activePoint.equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
         </div>
       </div>
     );
   };
 
+  const modeButton = (
+    mode: 'curve' | 'candles' | 'dual',
+    label: string,
+    Icon: typeof LineIcon,
+  ) => (
+    <button
+      key={mode}
+      type="button"
+      onClick={() => setDisplayMode(mode)}
+      aria-pressed={displayMode === mode}
+      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium ${
+        displayMode === mode
+          ? 'border border-[#24382f] bg-[#18261f] text-[#b5f542]'
+          : 'text-[#7f9389] hover:text-white'
+      }`}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </button>
+  );
+
   return (
-    <div className="bg-[#111a16] border border-[#1a2922] rounded-3xl p-5 sm:p-6 space-y-4 relative overflow-hidden flex flex-col justify-between w-full h-full">
-      
-      {/* Top Header */}
+    <section className="flex h-full w-full flex-col justify-between space-y-4 overflow-hidden rounded-3xl border border-[#1a2922] bg-[#111a16] p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <span className="text-xs font-medium text-[#7f9389]">Agent Capital & Growth Tracker (Real-Time Calibrated)</span>
-          <div className="flex items-baseline space-x-2.5 mt-1">
-            <span className="text-2xl sm:text-3xl font-bold font-sans text-white tracking-tight">
+          <span className="text-xs font-medium text-[#7f9389]">Simulated account equity · trade-by-trade</span>
+          <div className="mt-1 flex items-baseline gap-2.5">
+            <span className="font-sans text-2xl font-bold tracking-tight text-white sm:text-3xl">
               ${currentCapital.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
-            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 ${
-              isPositive 
-                ? 'bg-[#b5f542]/10 border border-[#b5f542]/20 text-[#b5f542]' 
-                : 'bg-[#ff5c5c]/10 border border-[#ff5c5c]/20 text-[#ff5c5c]'
+            <span className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
+              isPositive
+                ? 'border-[#b5f542]/20 bg-[#b5f542]/10 text-[#b5f542]'
+                : 'border-[#ff5c5c]/20 bg-[#ff5c5c]/10 text-[#ff5c5c]'
             }`}>
-              {isPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+              {isPositive ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
               {isPositive ? '+' : ''}{returnPct}%
             </span>
           </div>
         </div>
 
-        {/* Display Mode Switchers (Curve / Candles / Side-by-Side Dual) */}
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center bg-[#0c1310] p-1 rounded-xl border border-[#1a2922] text-xs">
-            <button
-              onClick={() => setDisplayMode('curve')}
-              className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 font-medium ${
-                displayMode === 'curve' ? 'bg-[#18261f] text-[#b5f542] border border-[#24382f]' : 'text-[#7f9389] hover:text-white'
-              }`}
-              title="Capital Growth Curve"
-            >
-              <LineIcon className="w-3.5 h-3.5" />
-              <span>Capital</span>
-            </button>
-            <button
-              onClick={() => setDisplayMode('candles')}
-              className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 font-medium ${
-                displayMode === 'candles' ? 'bg-[#18261f] text-[#b5f542] border border-[#24382f]' : 'text-[#7f9389] hover:text-white'
-              }`}
-              title="Live BTC Candlesticks"
-            >
-              <CandleIcon className="w-3.5 h-3.5" />
-              <span>Candles</span>
-            </button>
-            <button
-              onClick={() => setDisplayMode('dual')}
-              className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 font-medium ${
-                displayMode === 'dual' ? 'bg-[#18261f] text-[#b5f542] border border-[#24382f]' : 'text-[#7f9389] hover:text-white'
-              }`}
-              title="Side by Side Dual Screen"
-            >
-              <Columns className="w-3.5 h-3.5" />
-              <span>Dual</span>
-            </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center rounded-xl border border-[#1a2922] bg-[#0c1310] p-1">
+            {modeButton('curve', 'Capital', LineIcon)}
+            {modeButton('candles', 'Candles', CandleIcon)}
+            {modeButton('dual', 'Dual', Columns)}
           </div>
-
-          {/* Timeframe Dropdown */}
-          <div className="relative">
+          {displayMode === 'curve' && points.length > 16 && (
             <button
-              onClick={() => setShowTfDropdown(!showTfDropdown)}
-              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-[#0c1310] border border-[#1a2922] text-xs font-medium text-white"
+              type="button"
+              onClick={() => {
+                chartScrollRef.current?.scrollTo({ left: chartScrollRef.current.scrollWidth, behavior: 'auto' });
+                setSelectedIndex(null);
+              }}
+              className="inline-flex items-center gap-1 rounded-xl border border-[#1a2922] bg-[#0c1310] px-3 py-2 text-[10px] font-medium text-[#cbd5cf] hover:text-white"
             >
-              <span>{timeframe}</span>
-              <ChevronDown className="w-3 h-3 text-[#7f9389]" />
+              Latest <ArrowRight className="h-3 w-3" />
             </button>
-            {showTfDropdown && (
-              <div className="absolute right-0 top-full mt-1.5 w-24 bg-[#111a16] border border-[#1a2922] rounded-xl shadow-xl z-20 p-1 text-xs">
-                {['15m', '1h', '4h', '1D', '6 Month'].map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => {
-                      setTimeframe(tf);
-                      setShowTfDropdown(false);
-                    }}
-                    className="w-full text-left px-2 py-1 rounded-lg text-[#7f9389] hover:text-white hover:bg-[#18261f]"
-                  >
-                    {tf}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
 
-      {/* Main Expansive Chart Canvas Area */}
-      <div className="h-[280px] sm:h-[310px] w-full select-none">
+      <div className="h-[280px] w-full select-none sm:h-[310px]">
         {displayMode === 'curve' && (
-          <div className="h-full w-full">
-            {renderSplineCurveView()}
+          <div
+            ref={chartScrollRef}
+            className="h-full w-full overflow-x-auto overflow-y-hidden rounded-2xl border border-[#18261f] bg-[#0c1310]"
+            role="region"
+            aria-label="Scrollable account equity history"
+            tabIndex={0}
+          >
+            <div className="h-full" style={{ width: `${chartWidth}px` }}>
+              {renderEquityCurve()}
+            </div>
           </div>
         )}
 
         {displayMode === 'candles' && (
-          <div className="h-full w-full bg-[#0c1310] rounded-2xl border border-[#18261f] p-3.5 flex flex-col justify-between">
+          <div className="flex h-full w-full flex-col justify-between rounded-2xl border border-[#18261f] bg-[#0c1310] p-3.5">
             <div className="flex justify-between text-xs text-[#7f9389]">
-              <span>BTC/USDT Live Candlesticks</span>
-              <span className="text-[#10b981] font-bold">
-                {currentBtcPrice > 0 ? `$${currentBtcPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : 'Market data unavailable'}
+              <span>BTC/USDT · recent 15-minute candles</span>
+              <span className="font-bold text-[#10b981]">
+                {currentBtcPrice > 0
+                  ? `$${currentBtcPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+                  : 'Market data unavailable'}
               </span>
             </div>
-            <div className="h-[230px] w-full">
-              {renderCandlestickView()}
-            </div>
+            <div className="h-[230px] w-full">{renderCandlesticks()}</div>
           </div>
         )}
 
         {displayMode === 'dual' && (
-          <div className="grid grid-cols-2 gap-4 h-full w-full">
-            <div className="bg-[#0c1310] rounded-2xl border border-[#18261f] p-3 flex flex-col justify-between">
-              <span className="text-[11px] text-[#7f9389]">Calibrated Capital Trajectory</span>
-              <div className="h-[220px] w-full">
-                {renderSplineCurveView(360, 220)}
-              </div>
+          <div className="grid h-full w-full grid-cols-2 gap-4">
+            <div className="flex flex-col justify-between rounded-2xl border border-[#18261f] bg-[#0c1310] p-3">
+              <span className="text-[11px] text-[#7f9389]">Historical simulated equity</span>
+              <div className="h-[220px] w-full overflow-x-auto">{renderEquityCurve()}</div>
             </div>
-            <div className="bg-[#0c1310] rounded-2xl border border-[#18261f] p-3 flex flex-col justify-between">
-              <span className="text-[11px] text-[#7f9389]">Live Candlestick Bar Graph</span>
-              <div className="h-[220px] w-full">
-                {renderCandlestickView(360, 220)}
-              </div>
+            <div className="flex flex-col justify-between rounded-2xl border border-[#18261f] bg-[#0c1310] p-3">
+              <span className="text-[11px] text-[#7f9389]">Recent BTC/USDT candles</span>
+              <div className="h-[220px] w-full">{renderCandlesticks(360, 220)}</div>
             </div>
           </div>
         )}
       </div>
 
-      {/* Axis Footer displaying Real Trade Calibration Points */}
-      <div className="flex justify-between text-[11px] font-sans text-[#7f9389] pt-1 border-t border-[#18261f]/50">
-        <span>Base: ${initialCapital.toLocaleString()}</span>
-        <span>Points: {points.length} trade milestones</span>
-        <span className="text-[#b5f542] font-semibold">Calibrated From Real PnL</span>
+      <div className="flex justify-between border-t border-[#18261f]/50 pt-1 font-sans text-[11px] text-[#7f9389]">
+        <span>Start: ${initialCapital.toLocaleString()}</span>
+        <span>{points.length} equity points</span>
+        <span className="font-semibold text-[#b5f542]">Oldest to newest · paper only</span>
       </div>
-
-    </div>
+    </section>
   );
 }
